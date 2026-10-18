@@ -1,0 +1,40 @@
+name: Bela Stock - Vincular lote Drive
+on:
+  push:
+    paths:
+      - scripts/quarto-crescente-links-lote.php
+      - .github/workflows/quarto-links-lote.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  vincular:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - run: php -l scripts/quarto-crescente-links-lote.php
+      - name: Cadastrar referencias sem download
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/key ~/.ssh/known_hosts
+          opts=(-i ~/.ssh/key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes)
+          scp "${opts[@]}" scripts/quarto-crescente-links-lote.php "$USER@$HOST:/tmp/bs-links-${GITHUB_RUN_ID}.php"
+          ssh "${opts[@]}" "$USER@$HOST" "RID='${GITHUB_RUN_ID}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          file="/tmp/bs-links-${RID}.php"
+          trap 'rm -f "$file"' EXIT
+          test -f "$site/wp-config.php"
+          test "$(stat -c %U "$site")" = belastock-loja
+          cd "$site"
+          runuser -u belastock-loja -- wp eval-file "$file"
+          REMOTE
