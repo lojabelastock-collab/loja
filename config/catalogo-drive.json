@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "source": "https://drive.google.com/drive/folders/1NrqZeshzVAtN1UKG8P1w7Hit_UuDxB3f",
+  "facets": {
+    "publico": [
+      "Masculino",
+      "Feminino",
+      "Unissex",
+      "Infantil"
+    ],
+    "modelo": [
+      "Manga Curta",
+      "Manga Longa",
+      "Regata",
+      "Oversized",
+      "Baby Look",
+      "Cropped",
+      "Polo",
+      "Gola V"
+    ],
+    "tema": [
+      "Frases e Motivacionais",
+      "Humor e Memes",
+      "Anime e Geek",
+      "Series e Filmes",
+      "Musica e Bandas",
+      "Games",
+      "Pets e Animais",
+      "Profissoes",
+      "Esportes e Times",
+      "Nostalgia e Retro",
+      "Religiosos e Gospel",
+      "Regionalismo",
+      "Florais e Minimalistas",
+      "Arte e Ilustracoes",
+      "Datas Comemorativas",
+      "Personalizadas",
+      "Basicas e Lisas",
+      "Outros Temas"
+    ]
+  },
+  "production": [
+    "Estampas Sem Fundo",
+    "Estampas Com Fundo",
+    "Camisas Prontas Brancas",
+    "Camisas Prontas Pretas",
+    "Camisas Prontas Coloridas",
+    "Mockups",
+    "SVG"
+  ],
+  "review": [
+    "Classificacao Incerta",
+    "Arquivos Corrompidos",
+    "Duplicados",
+    "Formatos Nao Reconhecidos"
+  ],
+  "rules": {
+    "imageSources": "somente arquivos reais do Google Drive ou loja existente",
+    "originals": "preservar; sem substituicao ou exclusao",
+    "categoryModel": "categoria principal para navegacao; publico, modelo e tema como filtros",
+    "recommendation": [
+      "BRANCA",
+      "PRETA",
+      "BRANCA_E_PRETA",
+      "AJUSTE_NECESSARIO"
+    ],
+    "uncertain": "manter em revisao, sem inventar classificacao",
+    "mockup": "nao publicar produtos sem imagem real validada"
+  }
+}
