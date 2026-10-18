@@ -1,0 +1,46 @@
+name: Bela Stock - Publicar Experience
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: belastock-experience-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validar sintaxe PHP
+        run: php -l plugins/belastock-experience/belastock-experience.php
+      - name: Enviar plugin ao diretorio exclusivo
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/key ~/.ssh/known_hosts
+          opts=(-i ~/.ssh/key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes)
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          target="$site/wp-content/plugins/belastock-experience"
+          ssh "${opts[@]}" "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          test -f "$site/wp-config.php"
+          test "$(stat -c %U "$site")" = belastock-loja
+          test ! -L "$site/wp-content/plugins/belastock-experience"
+          install -d -o belastock-loja -g belastock-loja -m 750 "$site/wp-content/plugins/belastock-experience/assets"
+          REMOTE
+          for path in belastock-experience.php assets/style.css assets/studio.js; do
+            src="plugins/belastock-experience/$path"
+            dest="$target/$path"
+            scp "${opts[@]}" "$src" "$USER@$HOST:/tmp/bs-${GITHUB_RUN_ID}-$(basename "$path")"
+            ssh "${opts[@]}" "$USER@$HOST" "set -eu; dest='$dest'; temp='/tmp/bs-${GITHUB_RUN_ID}-$(basename "$path")'; if [ -f \"\$dest\" ]; then cp -p \"\$dest\" \"\$dest.backup-${GITHUB_RUN_ID}\"; fi; install -o belastock-loja -g belastock-loja -m 640 \"\$temp\" \"\$dest\"; rm -f \"\$temp\""
+          done
+          echo "Bela Stock Experience instalado sem ativar o plugin, sem alterar a homepage e sem tocar em outros sites."
