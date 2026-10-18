@@ -1,0 +1,41 @@
+name: Bela Stock - Categorias e menu
+on:
+  push:
+    paths:
+      - scripts/categorias-menu-demos.php
+      - .github/workflows/categorias-menu.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  aplicar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sintaxe PHP
+        run: php -l scripts/categorias-menu-demos.php
+      - name: Configurar catalogo no WordPress
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/key ~/.ssh/known_hosts
+          args=(-i ~/.ssh/key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
+          scp "${args[@]}" scripts/categorias-menu-demos.php "$USER@$HOST:/tmp/bs-categories-${GITHUB_RUN_ID}.php"
+          ssh "${args[@]}" "$USER@$HOST" "RID='${GITHUB_RUN_ID}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          script="/tmp/bs-categories-${RID}.php"
+          trap 'rm -f "$script"' EXIT
+          test -f "$site/wp-config.php"
+          test "$(stat -c %U "$site")" = belastock-loja
+          cd "$site"
+          runuser -u belastock-loja -- wp eval-file "$script"
+          REMOTE
