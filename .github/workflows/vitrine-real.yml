@@ -1,0 +1,44 @@
+name: Bela Stock - Publicar vitrine real
+on:
+  push:
+    paths:
+      - 'plugins/belastock-vitrine/**'
+      - '.github/workflows/vitrine-real.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: php -l plugins/belastock-vitrine/belastock-vitrine.php
+      - name: Instalar modulo de vitrine
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/key ~/.ssh/known_hosts
+          opts=(-i ~/.ssh/key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
+          scp "${opts[@]}" plugins/belastock-vitrine/belastock-vitrine.php "$USER@$HOST:/tmp/bs-vitrine-${GITHUB_RUN_ID}.php"
+          ssh "${opts[@]}" "$USER@$HOST" "RID='${GITHUB_RUN_ID}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          test -f "$site/wp-config.php"
+          test "$(stat -c %U "$site")" = belastock-loja
+          d="$site/wp-content/plugins/belastock-vitrine"
+          test ! -L "$d"
+          install -d -o belastock-loja -g belastock-loja -m 750 "$d"
+          if [ -f "$d/belastock-vitrine.php" ]; then cp -p "$d/belastock-vitrine.php" "$d/belastock-vitrine.php.backup-${RID}"; fi
+          install -o belastock-loja -g belastock-loja -m 640 "/tmp/bs-vitrine-${RID}.php" "$d/belastock-vitrine.php"
+          rm -f "/tmp/bs-vitrine-${RID}.php"
+          cd "$site"
+          runuser -u belastock-loja -- wp plugin activate belastock-vitrine
+          REMOTE
