@@ -1,0 +1,47 @@
+name: Bela Stock - Aplicar homepage e categorias
+on:
+  push:
+    paths:
+      - 'scripts/aplicar-loja.php'
+      - '.github/workflows/aplicar-loja.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: belastock-site-configuration
+  cancel-in-progress: false
+jobs:
+  aplicar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validar script
+        run: php -l scripts/aplicar-loja.php
+      - name: Aplicar somente no WordPress da loja
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/key ~/.ssh/known_hosts
+          opts=(-i ~/.ssh/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes)
+          scp "${opts[@]}" scripts/aplicar-loja.php "$USER@$HOST:/tmp/bs-aplicar-${GITHUB_RUN_ID}.php"
+          ssh "${opts[@]}" "$USER@$HOST" "RUN_ID='${GITHUB_RUN_ID}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          script="/tmp/bs-aplicar-${RUN_ID}.php"
+          trap 'rm -f "$script"' EXIT
+          test "$(stat -c %U "$site")" = belastock-loja
+          test -f "$site/wp-config.php"
+          command -v wp >/dev/null
+          cd "$site"
+          runuser -u belastock-loja -- wp plugin is-active belastock-catalogo
+          runuser -u belastock-loja -- wp plugin is-active belastock-experience
+          runuser -u belastock-loja -- wp eval-file "$script"
+          REMOTE
