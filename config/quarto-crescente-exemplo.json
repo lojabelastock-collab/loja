@@ -1,0 +1,31 @@
+{
+  "category": "Quarto Crescente",
+  "source_folder": "https://drive.google.com/drive/folders/1dBZ7KNISAeJgpDe0D1cASP9uhsck5JHZ",
+  "group": "Emblema lua em moldura quadrada",
+  "grouping": "mesma estampa verificada visualmente",
+  "color_variants": [
+    {
+      "color": "Preta",
+      "drive_id": "1FjRiih47X9uQ0a1DB-7Pa4BVafNoxWt2"
+    },
+    {
+      "color": "Verde",
+      "drive_id": "10m3ZhSWUMSng55VTk67XiSfXvmDbNY0o"
+    },
+    {
+      "color": "Rosa",
+      "drive_id": "1qKJfBUT2pZp43OgDrPCXSGndBuvC75Hl"
+    }
+  ],
+  "excluded_from_group": [
+    {
+      "file": "QUARTO CRESCENTE branca 4x4.png",
+      "reason": "estampa diferente, quatro quadros"
+    },
+    {
+      "file": "QUARTO CRESCENTE branca 4 LIAS.png",
+      "reason": "estampa diferente, quatro símbolos lilás"
+    }
+  ],
+  "store_policy": "Produto variável; variações por cor; preço e estoque pendentes; importar mídias reais no WordPress antes de publicar"
+}
