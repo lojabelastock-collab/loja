@@ -1,0 +1,52 @@
+name: Bela Stock - Instalar integracao visual
+on:
+  push:
+    paths:
+      - 'plugins/belastock-visual/**'
+      - '.github/workflows/instalar-visual.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: belastock-visual
+  cancel-in-progress: false
+jobs:
+  instalar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: php -l plugins/belastock-visual/belastock-visual.php
+      - name: Instalar somente Bela Stock Visual
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          ssh_args=(-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes)
+          scp "${ssh_args[@]}" plugins/belastock-visual/belastock-visual.php "$USER@$HOST:/tmp/bs-visual-${GITHUB_RUN_ID}.php"
+          ssh "${ssh_args[@]}" "$USER@$HOST" "RUN_ID='${GITHUB_RUN_ID}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          test -f "$site/wp-config.php"
+          test "$(stat -c %U "$site")" = belastock-loja
+          dst="$site/wp-content/plugins/belastock-visual"
+          test ! -L "$dst"
+          install -d -o belastock-loja -g belastock-loja -m 750 "$dst"
+          if [ -f "$dst/belastock-visual.php" ]; then
+             cp -p "$dst/belastock-visual.php" "$dst/belastock-visual.php.backup-${RUN_ID}"
+          fi
+          install -o belastock-loja -g belastock-loja -m 640 "/tmp/bs-visual-${RUN_ID}.php" "$dst/belastock-visual.php"
+          rm -f "/tmp/bs-visual-${RUN_ID}.php"
+          if command -v wp >/dev/null 2>&1; then
+            cd "$site"
+            runuser -u belastock-loja -- wp plugin activate belastock-visual
+          fi
+          echo "Integracao instalada; template e pagina original preservados."
+          REMOTE
