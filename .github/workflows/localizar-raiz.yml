@@ -1,0 +1,47 @@
+name: Bela Stock - Localizar raiz do site
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  localizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Localizar raiz sem alterar arquivos
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/key ~/.ssh/known_hosts
+          ssh -i ~/.ssh/key -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          conf=/etc/nginx/sites-enabled/loja.belastock.com.br.conf
+          if [ ! -f "$conf" ]; then echo "NGINX: configuracao nao encontrada"; exit 1; fi
+          echo "NGINX: configuracao encontrada"
+          grep -E '^[[:space:]]*(root|alias|include)[[:space:]]+' "$conf" | sed -E 's/([[:space:]]+).*$/\1[omitido]/' | sort -u || true
+          echo "Caminhos de root declarados:"
+          grep -E '^[[:space:]]*root[[:space:]]+' "$conf" | sed -E 's/^[[:space:]]*root[[:space:]]+([^;]+);.*/\1/' | sort -u | while IFS= read -r dir; do
+            case "$dir" in
+              /*)
+                echo "Raiz: $dir"
+                if [ -d "$dir" ]; then
+                  stat -c 'Proprietario=%U Grupo=%G Permissoes=%a' "$dir"
+                  [ ! -f "$dir/wp-config.php" ] || echo "WordPress: wp-config.php presente"
+                  [ ! -f "$dir/wp-includes/version.php" ] || echo "WordPress: core presente"
+                  [ ! -d "$dir/wp-content" ] || echo "WordPress: wp-content presente"
+                else
+                  echo "Diretorio inexistente"
+                fi
+                ;;
+              *) echo "Raiz dinamica: requer revisao manual" ;;
+            esac
+          done
+          echo "Leitura concluida"
+          REMOTE
