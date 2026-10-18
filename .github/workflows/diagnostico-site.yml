@@ -1,0 +1,41 @@
+name: Bela Stock - Diagnostico site (leitura)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspecionar somente dominio da loja
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/key ~/.ssh/known_hosts
+          ssh -i ~/.ssh/key -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          domain=loja.belastock.com.br
+          echo "Procurando configuracao de $domain"
+          for conf in "/etc/nginx/sites-enabled/$domain.conf" "/etc/nginx/sites-available/$domain.conf" "/etc/nginx/sites-enabled/$domain" "/etc/nginx/sites-available/$domain"; do
+            if [ -f "$conf" ]; then
+              echo "Arquivo NGINX: $conf"
+              grep -E '^[[:space:]]*(server_name|root)[[:space:]]+' "$conf" | head -n 12 || true
+            fi
+          done
+          for dir in "/home/$domain/htdocs/$domain" "/home/$domain/htdocs" "/home/$domain/public_html"; do
+            if [ -d "$dir" ]; then
+              echo "Diretorio: $dir"
+              stat -c 'Proprietario: %U Grupo: %G' "$dir"
+              [ ! -f "$dir/wp-config.php" ] || echo "WordPress encontrado"
+            fi
+          done
+          echo "Diagnostico concluido; nenhum arquivo alterado."
+          REMOTE
