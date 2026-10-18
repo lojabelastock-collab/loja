@@ -1,0 +1,48 @@
+name: Bela Stock - Publicar modulo Core
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: belastock-core-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publicar somente plugin Bela Stock
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/key ~/.ssh/known_hosts
+          SSH=(ssh -i ~/.ssh/key -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes)
+          SITE=/home/belastock-loja/htdocs/loja.belastock.com.br
+          "${SSH[@]}" "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          test -f "$site/wp-config.php"
+          test -d "$site/wp-content/plugins"
+          test "$(stat -c %U "$site")" = belastock-loja
+          test ! -L "$site/wp-content/plugins/belastock-core"
+          install -d -o belastock-loja -g belastock-loja -m 750 "$site/wp-content/plugins/belastock-core"
+          REMOTE
+          scp -i ~/.ssh/key -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes plugins/belastock-core/belastock-core.php "$USER@$HOST:/tmp/belastock-core-${GITHUB_RUN_ID}.php"
+          "${SSH[@]}" "$USER@$HOST" "bash -s" <<REMOTE
+          set -euo pipefail
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          tmp=/tmp/belastock-core-${GITHUB_RUN_ID}.php
+          dst=\$site/wp-content/plugins/belastock-core/belastock-core.php
+          if [ -f "\$dst" ]; then cp -p "\$dst" "\$dst.predeploy-${GITHUB_RUN_ID}"; fi
+          install -o belastock-loja -g belastock-loja -m 640 "\$tmp" "\$dst"
+          rm -f "\$tmp"
+          echo "Plugin publicado, ativacao nao alterada."
+          REMOTE
