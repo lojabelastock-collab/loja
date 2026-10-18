@@ -1,0 +1,58 @@
+name: Bela Stock - Idioma e Gestao
+on:
+  push:
+    paths:
+      - plugins/belastock-gestao-ia/**
+      - scripts/idioma-imagens.php
+      - .github/workflows/idioma-gestao.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: belastock-idioma-gestao
+  cancel-in-progress: false
+jobs:
+  aplicar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sintaxe dos arquivos PHP
+        run: |
+          php -l plugins/belastock-gestao-ia/belastock-gestao-ia.php
+          php -l scripts/idioma-imagens.php
+      - name: Implantar e ativar modulo; instalar traducao pt_BR
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/key ~/.ssh/known_hosts
+          opts=(-i ~/.ssh/key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes)
+          scp "${opts[@]}" plugins/belastock-gestao-ia/belastock-gestao-ia.php "$USER@$HOST:/tmp/bs-gestao-${GITHUB_RUN_ID}.php"
+          scp "${opts[@]}" scripts/idioma-imagens.php "$USER@$HOST:/tmp/bs-idioma-${GITHUB_RUN_ID}.php"
+          ssh "${opts[@]}" "$USER@$HOST" "RID='${GITHUB_RUN_ID}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          dst="$site/wp-content/plugins/belastock-gestao-ia"
+          source="/tmp/bs-gestao-${RID}.php"
+          script="/tmp/bs-idioma-${RID}.php"
+          trap 'rm -f "$source" "$script"' EXIT
+          test -f "$site/wp-config.php"
+          test "$(stat -c %U "$site")" = belastock-loja
+          test ! -L "$dst"
+          install -d -o belastock-loja -g belastock-loja -m 750 "$dst"
+          if [ -f "$dst/belastock-gestao-ia.php" ]; then cp -p "$dst/belastock-gestao-ia.php" "$dst/belastock-gestao-ia.php.backup-${RID}"; fi
+          install -o belastock-loja -g belastock-loja -m 640 "$source" "$dst/belastock-gestao-ia.php"
+          cd "$site"
+          runuser -u belastock-loja -- wp plugin activate belastock-gestao-ia
+          runuser -u belastock-loja -- wp language core install pt_BR || echo 'Pacote de idioma indisponivel'
+          runuser -u belastock-loja -- wp language plugin install --all pt_BR || echo 'Alguns plugins nao fornecem traducao'
+          runuser -u belastock-loja -- wp language theme install --all pt_BR || echo 'Alguns temas nao fornecem traducao'
+          runuser -u belastock-loja -- wp eval-file "$script"
+          REMOTE
