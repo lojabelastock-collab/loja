@@ -1,0 +1,84 @@
+name: Bela Stock - Implantar modulos isolados
+on:
+  push:
+    paths:
+      - 'plugins/**'
+      - '.github/workflows/implantar-modulos.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: belastock-modules
+  cancel-in-progress: false
+jobs:
+  implantar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validar PHP dos modulos
+        run: |
+          set -euo pipefail
+          find plugins -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Publicar plugins sem modificar outros sites
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          SSH_OPTS=(-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes)
+          SITE=/home/belastock-loja/htdocs/loja.belastock.com.br
+          ssh "${SSH_OPTS[@]}" "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          test -f "$site/wp-config.php"
+          test -d "$site/wp-content/plugins"
+          test "$(stat -c %U "$site")" = "belastock-loja"
+          for p in belastock-core belastock-catalogo belastock-experience; do
+            test ! -L "$site/wp-content/plugins/$p"
+          done
+          REMOTE
+          tar -czf /tmp/bs-modules.tar.gz -C plugins belastock-core belastock-catalogo belastock-experience
+          scp "${SSH_OPTS[@]}" /tmp/bs-modules.tar.gz "$USER@$HOST:/tmp/bs-modules-${GITHUB_RUN_ID}.tar.gz"
+          ssh "${SSH_OPTS[@]}" "$USER@$HOST" "RUN_ID='${GITHUB_RUN_ID}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          tmp="/tmp/bs-modules-${RUN_ID}.tar.gz"
+          stage=$(mktemp -d /tmp/bs-stage.XXXXXXXX)
+          trap 'rm -rf "$stage"; rm -f "$tmp"' EXIT
+          tar -xzf "$tmp" -C "$stage" --no-same-owner --no-same-permissions
+          plugins="$site/wp-content/plugins"
+          for p in belastock-core belastock-catalogo belastock-experience; do
+            test -f "$stage/$p/$p.php"
+            dest="$plugins/$p"
+            if [ -e "$dest" ]; then
+              test -d "$dest"
+              cp -a "$dest" "$plugins/${p}.backup-${RUN_ID}"
+            fi
+            install -d -o belastock-loja -g belastock-loja -m 750 "$dest"
+            cp -a "$stage/$p/." "$dest/"
+            chown -R belastock-loja:belastock-loja "$dest"
+            find "$dest" -type d -exec chmod 750 {} +
+            find "$dest" -type f -exec chmod 640 {} +
+            echo "Modulo publicado: $p"
+          done
+          if command -v wp >/dev/null 2>&1; then
+            for p in belastock-core belastock-catalogo belastock-experience; do
+              if ! (cd "$site" && runuser -u belastock-loja -- wp plugin is-active "$p" 2>/dev/null); then
+                (cd "$site" && runuser -u belastock-loja -- wp plugin activate "$p") || {
+                  echo "::error::Falha ativando $p"
+                  exit 1
+                }
+              fi
+            done
+          else
+            echo "WP-CLI indisponivel: plugins publicados, ativacao pendente."
+          fi
+          REMOTE
