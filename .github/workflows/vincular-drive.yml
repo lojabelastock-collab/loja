@@ -1,0 +1,54 @@
+name: Bela Stock - Vincular imagens Drive
+on:
+  push:
+    paths:
+      - 'plugins/belastock-drive-media/**'
+      - 'scripts/vincular-quarto-drive.php'
+      - '.github/workflows/vincular-drive.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: belastock-drive-catalog
+  cancel-in-progress: false
+jobs:
+  executar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          php -l plugins/belastock-drive-media/belastock-drive-media.php
+          php -l scripts/vincular-quarto-drive.php
+      - name: Cadastrar referencias sem baixar imagens
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          opts=(-i ~/.ssh/deploy_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
+          scp "${opts[@]}" plugins/belastock-drive-media/belastock-drive-media.php "$USER@$HOST:/tmp/bs-drive-${GITHUB_RUN_ID}.php"
+          scp "${opts[@]}" scripts/vincular-quarto-drive.php "$USER@$HOST:/tmp/bs-catalog-${GITHUB_RUN_ID}.php"
+          ssh "${opts[@]}" "$USER@$HOST" "RUN_ID='${GITHUB_RUN_ID}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          site=/home/belastock-loja/htdocs/loja.belastock.com.br
+          plugin="$site/wp-content/plugins/belastock-drive-media"
+          script="/tmp/bs-catalog-${RUN_ID}.php"
+          source="/tmp/bs-drive-${RUN_ID}.php"
+          trap 'rm -f "$script" "$source"' EXIT
+          test "$(stat -c %U "$site")" = belastock-loja
+          test -f "$site/wp-config.php"
+          test ! -L "$plugin"
+          install -d -o belastock-loja -g belastock-loja -m 750 "$plugin"
+          if [ -f "$plugin/belastock-drive-media.php" ]; then cp -p "$plugin/belastock-drive-media.php" "$plugin/belastock-drive-media.php.backup-${RUN_ID}"; fi
+          install -o belastock-loja -g belastock-loja -m 640 "$source" "$plugin/belastock-drive-media.php"
+          cd "$site"
+          runuser -u belastock-loja -- wp plugin activate belastock-drive-media
+          runuser -u belastock-loja -- wp eval-file "$script"
+          REMOTE
