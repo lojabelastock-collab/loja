@@ -1,0 +1,96 @@
+name: BelaStock - Vitrine real midias e Elementor audit
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/auditar-vitrine-live.yml']
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Analyze current page HTML and broken image URLs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import urllib.request,urllib.error,urllib.parse,html.parser,collections,re
+          domain="https://www.belastock.com.br"
+          req=urllib.request.Request(domain+"/",headers={"User-Agent":"Mozilla/5.0 BelaStock-Media-Audit"})
+          with urllib.request.urlopen(req,timeout=25) as response:s=response.read().decode("utf-8","replace")
+          class Reader(html.parser.HTMLParser):
+            def __init__(self):super().__init__();self.images=[];self.backgrounds=[]
+            def handle_starttag(self,tag,attrs):
+              d=dict(attrs)
+              if tag in ('img','source'):
+                self.images.append({k:v for k,v in d.items() if k in ('src','srcset','data-src','data-srcset','data-lazy-src','class','alt','loading')})
+              if d.get('style','').find('url(')>=0:self.backgrounds.append(d['style'][:200])
+          p=Reader();p.feed(s)
+          print('HTML_LENGTH',len(s),'IMAGE_ELEMENTS',len(p.images),'BACKGROUND_STYLES',len(p.backgrounds))
+          for domainpart in ['belastock.com.br','www.belastock.com.br','tracosnativos.local','localhost','data-src=','srcset=','elementor-background-overlay','revslider']:
+            print('HTML_MARKER',domainpart,s.count(domainpart))
+          urls={}
+          for i,d in enumerate(p.images):
+            src=d.get('src','')
+            if src:urls[src]=i
+            if i<50:
+              print('IMG_HTML',i,'alt=',str(d.get('alt',''))[:55],'src=',src[:180],'lazy=',str(d.get('data-src',''))[:120],'srcset=',str(d.get('srcset',''))[:190])
+          for i,url in enumerate(list(urls)[:55]):
+            url=urllib.parse.urljoin(domain+'/',url)
+            if not url.startswith(domain+'/'):continue
+            try:
+              r=urllib.request.Request(url,method='HEAD',headers={'User-Agent':'Mozilla/5.0'})
+              with urllib.request.urlopen(r,timeout=10) as response:
+                print('IMG_HEAD',response.status,response.headers.get('Content-Type'),urllib.parse.urlsplit(url).path[:135])
+            except urllib.error.HTTPError as err:print('IMG_HEAD',err.code,'ERROR',urllib.parse.urlsplit(url).path[:135])
+            except Exception as err:print('IMG_HEAD',type(err).__name__,'ERROR',urllib.parse.urlsplit(url).path[:135])
+          PY
+      - name: WordPress database image link and catalog audit (read-only)
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/bs_key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/bs_key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/bs_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd /home/belastock/htdocs/belastock.com.br
+          echo '=== FRONT PAGE IDENTIFICATION ==='
+          wp option get show_on_front --allow-root --skip-plugins --skip-themes
+          wp option get page_on_front --allow-root --skip-plugins --skip-themes
+          echo '=== DOMAIN DRY RUN ==='
+          wp search-replace 'https://belastock.com.br' 'https://www.belastock.com.br' --all-tables-with-prefix --dry-run --precise --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes
+          echo '=== ELEMENTOR REFS COUNTS ==='
+          wp eval '
+          global $wpdb;
+          $patterns=["tracosnativos.local","localhost","https://belastock.com.br","http://belastock.com.br","mercadopago-logo-300x122-1.png"];
+          foreach($patterns as $x){
+            $o=(int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->options} WHERE option_value LIKE %s","%".$wpdb->esc_like($x)."%"));
+            $m=(int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_value LIKE %s","%".$wpdb->esc_like($x)."%"));
+            $p=(int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_content LIKE %s","%".$wpdb->esc_like($x)."%"));
+            echo "REF=". $x ." OPT=$o META=$m POST=$p".PHP_EOL;
+          }
+          ' --allow-root --skip-plugins --skip-themes
+          echo '=== RECENT PUBLISHED PRODUCT IMAGE STATUS ==='
+          wp eval '
+            $products=get_posts(["post_type"=>"product","post_status"=>"publish","posts_per_page"=>24,"orderby"=>"date","order"=>"DESC","fields"=>"ids"]);
+            foreach($products as $id){
+              $attachment=(int)get_post_thumbnail_id($id);
+              $file=$attachment?get_attached_file($attachment):"";
+              $url=$attachment?wp_get_attachment_url($attachment):"";
+              $name=get_the_title($id);
+              echo "PRODUCT #$id ".mb_substr($name,0,38)." THUMB_ID=$attachment FILE=".($file&&is_file($file)?"OK":"NOT_FOUND")." URL_HOST=".parse_url((string)$url,PHP_URL_HOST)." NAME=".basename((string)$url).PHP_EOL;
+            }
+          ' --allow-root --skip-plugins --skip-themes
+          echo '=== OTHER WP IMAGE CONFIG ==='
+          wp option get home --allow-root --skip-plugins --skip-themes
+          wp option get siteurl --allow-root --skip-plugins --skip-themes
+          wp plugin list --status=active --field=name --allow-root --skip-plugins --skip-themes | grep -Ei 'cache|image|slider|elementor|woocommerce|jet|shopengine' || true
+          echo 'AUDIT_END'
+          REMOTE
