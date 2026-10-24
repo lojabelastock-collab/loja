@@ -1,0 +1,84 @@
+name: BelaStock - Diagnosticar banner vazio
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/diagnosticar-banner-vps.yml']
+permissions:
+  contents: read
+jobs:
+  banner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Inspect WordPress Elementor and Revolution Slider
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/bs_key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/bs_key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/bs_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd /home/belastock/htdocs/belastock.com.br
+          wp eval '
+            global $wpdb;
+            $id=(int)get_option("page_on_front");
+            echo "FRONT_MODE=".get_option("show_on_front")." FRONT_ID=".$id.PHP_EOL;
+            $p=$id?get_post($id):null;
+            if($p)echo "FRONT_TITLE=".get_the_title($id)." FRONT_CONTENT_BYTES=".strlen($p->post_content)." FRONT_REV=".(strpos(strtolower($p->post_content),"revslider")!==false?"yes":"no").PHP_EOL;
+            $data=$id?(string)get_post_meta($id,"_elementor_data",true):"";
+            echo "ELEMENTOR_DATA_BYTES=".strlen($data).PHP_EOL;
+            $decoded=json_decode($data,true);
+            echo "ELEMENTOR_JSON_VALID=".(is_array($decoded)?"yes":"no").PHP_EOL;
+            if(is_array($decoded)){
+              $count=0;
+              $walker=function($items,$depth=0)use(&$walker,&$count){
+                foreach($items as $row){
+                  if(!is_array($row))continue;
+                  $type=$row["widgetType"]??"";
+                  $settings=$row["settings"]??[];
+                  if(!is_array($settings))$settings=[];
+                  $keys=[];
+                  foreach($settings as $k=>$v){
+                    if(preg_match("/(shortcode|slider|rev|background_image|background_color|image|template|alias)/i",$k)){
+                      $val=is_array($v)?($v["url"]??$v["id"]??"(complex)"):$v;
+                      $keys[]=$k."=".mb_substr(is_scalar($val)?(string)$val:"(object)",0,140);
+                    }
+                  }
+                  if($type||$keys){$count++;if($count<75)echo "ELEMENTOR_WIDGET type=$type id=".($row["id"]??"")." depth=$depth configs=".implode(";",array_slice($keys,0,8)).PHP_EOL;}
+                  if(!empty($row["elements"])&&is_array($row["elements"]))$walker($row["elements"],$depth+1);
+                }
+              };
+              $walker($decoded);
+              echo "ELEMENTOR_TOTAL_INTERESTING_WIDGETS=".$count.PHP_EOL;
+            }
+            echo "=== SLIDER REVOLUTION INVENTORY ===".PHP_EOL;
+            foreach(["revslider_sliders","revslider_slides"] as $part){
+              $table=$wpdb->prefix.$part;
+              $exists=$wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s",$table));
+              if(!$exists){echo "TABLE_MISSING=".$part.PHP_EOL;continue;}
+              $n=(int)$wpdb->get_var("SELECT COUNT(*) FROM ".$table);
+              echo "SLIDER_TABLE=".$part." ROWS=".$n.PHP_EOL;
+              if($part==="revslider_sliders"){
+                $rows=$wpdb->get_results("SELECT id,title,alias FROM ".$table." LIMIT 25",ARRAY_A);
+                foreach($rows as $row)echo "SLIDER id=".$row["id"]." alias=".$row["alias"]." title=".mb_substr($row["title"],0,65).PHP_EOL;
+              }else{
+                $rows=$wpdb->get_results("SELECT id,slider_id,params FROM ".$table." LIMIT 15",ARRAY_A);
+                foreach($rows as $row){
+                  $q=json_decode($row["params"],true);
+                  $bg=is_array($q)?(string)($q["bg"]["image"]??""):"";
+                  echo "SLIDE id=".$row["id"]." slider_id=".$row["slider_id"]." bg=".mb_substr($bg,0,180).PHP_EOL;
+                }
+              }
+            }
+          ' --allow-root --skip-plugins --skip-themes
+          echo '=== Local banner files (names only) ==='
+          find wp-content/uploads -type f \( -iname '*banner*' -o -iname '*slide*' -o -iname '*slider*' \) -printf '%P\n' 2>/dev/null | head -40
+          echo 'BANNER_READ_AUDIT_COMPLETE'
+          REMOTE
