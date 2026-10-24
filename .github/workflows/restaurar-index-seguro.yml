@@ -1,0 +1,103 @@
+name: BelaStock - Restaurar index WordPress original
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/restaurar-index-seguro.yml']
+permissions:
+  contents: read
+concurrency:
+  group: belastock-index-security-recovery
+  cancel-in-progress: false
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - name: Preserve suspicious entrypoint encrypted A and B outside VPS
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$HOST" && test -n "$USER" && test -n "$KEY" && test -n "$KNOWN"
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          scp -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "$USER@$HOST:/home/belastock/htdocs/belastock.com.br/index.php" "$RUNNER_TEMP/bs-index-suspicious.php"
+          test "$(wc -c < "$RUNNER_TEMP/bs-index-suspicious.php")" -gt 4000
+          grep -q 'F0430c2_KEY' "$RUNNER_TEMP/bs-index-suspicious.php"
+          echo "SUSPICIOUS_FILE_HASH=$(sha256sum "$RUNNER_TEMP/bs-index-suspicious.php" | cut -d' ' -f1)"
+          export BS_RECOVERY_PASS
+          BS_RECOVERY_PASS=$(printf '%s%s' "$KEY" 'belastock-index-quarantine-20261024' | sha256sum | cut -d' ' -f1)
+          for letter in A B; do
+            openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BS_RECOVERY_PASS \
+              -in "$RUNNER_TEMP/bs-index-suspicious.php" -out "$RUNNER_TEMP/bs-index-quarantine-$letter.enc"
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BS_RECOVERY_PASS -in "$RUNNER_TEMP/bs-index-quarantine-$letter.enc" | cmp -s - "$RUNNER_TEMP/bs-index-suspicious.php"
+          done
+          echo 'SUSPECT_INDEX_BACKUP_A_B_VALIDATED'
+      - name: Protected offsite copy A
+        uses: actions/upload-artifact@v4
+        with:
+          name: belastock-suspect-index-A
+          path: ${{ runner.temp }}/bs-index-quarantine-A.enc
+          retention-days: 90
+          if-no-files-found: error
+      - name: Protected offsite copy B
+        uses: actions/upload-artifact@v4
+        with:
+          name: belastock-suspect-index-B
+          path: ${{ runner.temp }}/bs-index-quarantine-B.enc
+          retention-days: 90
+          if-no-files-found: error
+      - name: Replace only compromised WordPress root index.php
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          root=/home/belastock/htdocs/belastock.com.br
+          test -f "$root/wp-config.php" && test -f "$root/wp-blog-header.php" && test -f "$root/index.php"
+          test ! -L "$root/index.php"
+          grep -qF 'F0430c2_KEY' "$root/index.php"
+          tmp=$(mktemp "$root/.bs-index-clean.XXXXXXXX")
+          trap 'rm -f "$tmp"' EXIT
+          cat > "$tmp" <<'PHP'
+          <?php
+          /**
+           * Front to the WordPress application.
+           *
+           * @package WordPress
+           */
+          define( 'WP_USE_THEMES', true );
+          require __DIR__ . '/wp-blog-header.php';
+          PHP
+          php -l "$tmp" >/dev/null
+          chown --reference="$root/index.php" "$tmp"
+          chmod 644 "$tmp"
+          mv -f "$tmp" "$root/index.php"
+          php -l "$root/index.php"
+          echo 'CANONICAL_WP_INDEX_RESTORED'
+          for path in / /wp-json/ /wp-login.php /wp-content/uploads/2024/05/camisa_225.webp; do
+            curl -sk --noproxy '*' --resolve www.belastock.com.br:443:127.0.0.1 \
+             --max-time 20 --max-redirs 0 -o /dev/null \
+             -w "ORIGIN_PATH=$path STATUS=%{http_code} BYTES=%{size_download} TYPE=%{content_type}\n" \
+             "https://www.belastock.com.br$path" || true
+          done
+          echo '=== CORE CHECKSUM STATUS ==='
+          (cd "$root" && wp core verify-checksums --allow-root --skip-plugins --skip-themes 2>&1 | tail -16) || true
+          echo 'RECOVERY_CHECK_COMPLETE'
+          REMOTE
