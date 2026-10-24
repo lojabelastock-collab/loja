@@ -1,0 +1,43 @@
+name: BelaStock - Identificar VPS para DNS correto
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/identificar-vps-deploy.yml']
+permissions:
+  contents: read
+jobs:
+  identify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - name: Report target server identity and authoritative DNS (read only)
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          echo '=== DNS authoritative nameservers ==='
+          dig NS belastock.com.br +short | head -8 || true
+          echo '=== Public WWW address (Cloudflare, if proxied) ==='
+          dig A www.belastock.com.br +short | head -5 || true
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          echo '=== Connected GitHub deployment host ==='
+          hostname -s
+          hostnamectl --static 2>/dev/null || true
+          echo '=== Server public IPv4 (outbound, may differ if NAT) ==='
+          curl -fsS --max-time 8 https://api.ipify.org || true
+          echo
+          echo '=== Server disk root size ==='
+          df -h / | tail -1
+          echo '=== WP canonical root identity ==='
+          stat -c 'WP_ROOT_OWNER=%U GROUP=%G' /home/belastock/htdocs/belastock.com.br
+          echo 'VPS_IDENTITY_COMPLETE'
+          REMOTE
