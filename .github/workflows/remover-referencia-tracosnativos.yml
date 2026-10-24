@@ -1,0 +1,70 @@
+name: BelaStock - Remover referencia legada de plugin
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/remover-referencia-tracosnativos.yml']
+permissions:
+  contents: read
+jobs:
+  remove-legacy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Replace only one legacy diagnostic reference with rollback
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${HOST:?missing DEPLOY_HOST}"
+          : "${USER:?missing DEPLOY_USER}"
+          : "${KEY:?missing DEPLOY_SSH_KEY}"
+          : "${KNOWN:?missing DEPLOY_KNOWN_HOSTS}"
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/bs_key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/bs_key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/bs_key" -o IdentitiesOnly=yes -o BatchMode=yes             -o StrictHostKeyChecking=yes -o ConnectTimeout=12 "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          root=/home/belastock/htdocs/belastock.com.br
+          target="$root/wp-content/plugins/belastock-ai-admin/belastock-ai-admin.php"
+          test -f "$root/wp-config.php" && test -f "$target" && test ! -L "$target"
+          if ! grep -q 'tracosnativos[.]local' "$target"; then
+            echo 'No stale reference remains in target plugin'; exit 0
+          fi
+          tmp=$(mktemp -d -p /tmp bs-legacy-patch.XXXXXXXX)
+          cp -p "$target" "$tmp/previous.php"
+          done_ok=0
+          cleanup() {
+             if [ "$done_ok" != 1 ]; then
+               cp -p "$tmp/previous.php" "$target" 2>/dev/null || true
+               echo 'ROLLBACK restored plugin'
+             fi
+             rm -rf "$tmp"
+          }
+          trap cleanup EXIT
+          php -l "$target" >/dev/null
+          export BS_PLUGIN_PATH="$target"
+          python3 - <<'PY'
+          import os,pathlib
+          p=pathlib.Path(os.environ['BS_PLUGIN_PATH'])
+          s=p.read_text()
+          old="(substr_count(wp_remote_retrieve_body($r),'tracosnativos.local')+substr_count(wp_remote_retrieve_body($r),'localhost/camisetas'))"
+          new="(int) preg_match('/(?:localhost|\\.local)/i', wp_remote_retrieve_body($r))"
+          if s.count(old)!=1: raise SystemExit("Expected legacy expression exactly once, no modification allowed")
+          p.write_text(s.replace(old,new))
+          PY
+          php -l "$target"
+          if grep -q 'tracosnativos[.]local' "$target"; then
+             echo 'Legacy reference still present; rollback'; exit 1
+          fi
+          cd "$root"
+          total="$(wp search-replace 'tracosnativos.local' 'www.belastock.com.br' --all-tables-with-prefix --dry-run --precise --skip-columns=guid --allow-root --skip-plugins --skip-themes 2>/dev/null | tail -1 || true)"
+          printf 'WordPress legacy DB dry-run: %s\n' "$total"
+          done_ok=1
+          echo 'PLUGIN_LEGACY_REFERENCE_REMOVED_AND_PHP_VALID'
+          REMOTE
