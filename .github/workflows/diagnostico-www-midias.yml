@@ -1,107 +1,75 @@
-name: BelaStock WWW - Diagnostico de midias (somente leitura)
+name: BelaStock WWW - Diagnostico de dominio e origem (leitura)
 on:
   push:
     branches: [audit/www-media-20261024]
-    paths:
-      - '.github/workflows/diagnostico-www-midias.yml'
+    paths: ['.github/workflows/diagnostico-www-midias.yml']
 permissions:
   contents: read
 jobs:
-  diagnostico:
+  diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 8
     steps:
-      - name: Public DNS and HTTP inspection
+      - name: HTTP public without following redirects
+        shell: bash
         run: |
           set -uo pipefail
-          echo "=== Canonical domain DNS ==="
-          getent ahostsv4 www.belastock.com.br | head -3 || true
-          echo "=== Canonical domain HTTPS ==="
-          curl --max-time 15 --silent --show-error \
-            --output /tmp/belastock-www.html \
-            --write-out 'http=%{http_code} effective=%{url_effective} redirects=%{num_redirects} bytes=%{size_download}\n' \
-            https://www.belastock.com.br/ || true
-          python3 - <<'PY'
-          import pathlib,html,re,urllib.parse
-          p=pathlib.Path('/tmp/belastock-www.html')
-          if not p.exists(): print('HTML unavailable'); exit()
-          s=p.read_text(errors='replace')
-          print('HTML markers:',{n:s.lower().count(n) for n in ('tracosnativos.local','localhost','loja.belastock.com.br','wp-content/uploads','drive.google.com')})
-          urls=[]
-          for x in re.findall(r'''(?:src|srcset|data-src|data-bg)=["']([^"']+)["']''',s,re.I):
-              for v in re.split(r',\s*(?=https?://|/)',html.unescape(x)):
-                  v=v.strip().split()[0]
-                  if any(k in v.lower() for k in ('jpg','png','webp','jpeg','uploads','local')):
-                      urls.append(v)
-          from collections import Counter
-          hosts=Counter(urllib.parse.urlparse(u).netloc or '(relative)' for u in urls)
-          print('Media hosts:',dict(hosts))
-          for u in urls[:12]:
-              print('Media sample:',u[:220])
-          import urllib.request,urllib.error
-          for u in list(dict.fromkeys(urls))[:18]:
-              if not u.startswith('https://www.belastock.com.br/'): continue
-              try:
-                  req=urllib.request.Request(u,method='HEAD',headers={'User-Agent':'Mozilla/5.0 BelaStock-Diagnostic'})
-                  with urllib.request.urlopen(req,timeout=8) as resp:
-                      print('Image HTTP:',resp.status,resp.headers.get('Content-Type'),u[:150])
-              except urllib.error.HTTPError as err:
-                  print('Image HTTP:',err.code,u[:150])
-              except Exception as err:
-                  print('Image HTTP error:',type(err).__name__,u[:150])
-          PY
-      - name: Read-only VPS audit with loja-scoped credentials
+          for url in https://belastock.com.br/ https://www.belastock.com.br/ https://belastock.com.br/wp-admin/ https://www.belastock.com.br/wp-admin/; do
+            echo "=== PUBLIC $url ==="
+            curl --max-time 15 --max-redirs 0 -sS -o /dev/null -D /tmp/bs_headers \
+              -w 'HTTP_RESULT status=%{http_code} effective=%{url_effective} redirs=%{num_redirects}\n' "$url" || true
+            grep -iE '^(HTTP/|location:|server:|cf-cache-status:|x-redirect-by:|cache-control:)' /tmp/bs_headers | head -12 || true
+          done
+      - name: Inspect Nginx and WordPress on canonical site only
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
           KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        shell: bash
         run: |
           set -euo pipefail
-          if [ -z "$HOST" ] || [ -z "$USER" ] || [ -z "$KEY" ] || [ -z "$KNOWN" ]; then
-             echo 'SSH diagnosis blocked: one or more loja repository credentials are not configured'
-             exit 0
+          if [[ -z "$HOST" || -z "$USER" || -z "$KEY" || -z "$KNOWN" ]]; then
+            echo 'BLOCKED: one or more loja SSH credentials missing'; exit 0
           fi
           umask 077
           mkdir -p "$HOME/.ssh"
           printf '%s\n' "$KEY" > "$HOME/.ssh/bs_audit_key"
           printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/bs_audit_key" "$HOME/.ssh/known_hosts"
-          ssh -i "$HOME/.ssh/bs_audit_key" -o IdentitiesOnly=yes \
-            -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=12 \
-            "$USER@$HOST" 'bash -s' <<'REMOTE'
+          ssh -i "$HOME/.ssh/bs_audit_key" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o ConnectTimeout=12 "$USER@$HOST" 'bash -s' <<'REMOTE'
           set -uo pipefail
-          echo '=== Nginx www vhost references (read-only) ==='
-          for folder in /etc/nginx/sites-enabled /etc/nginx/sites-available; do
-            [ -d "$folder" ] || continue
-            grep -lEr 'server_name.*www\.belastock\.com\.br' "$folder" 2>/dev/null | head -8 | while read -r conf; do
-              echo "config=$conf"
-              grep -E '^[[:space:]]*(server_name|root)[[:space:]]+' "$conf" | head -10 || true
+          conf=/etc/nginx/sites-enabled/belastock.com.br.conf
+          root=/home/belastock/htdocs/belastock.com.br
+          echo '=== NGINX canonical virtual host ==='
+          if [ -f "$conf" ]; then
+            echo "configuration=$conf"
+            grep -nE 'server_name|^[[:space:]]*root |^[[:space:]]*return |^[[:space:]]*rewrite |^[[:space:]]*proxy_pass |fastcgi_pass|listen ' "$conf" | head -60 || true
+          else
+            echo 'Canonical Nginx config not found at expected location'
+          fi
+          echo '=== LOCAL ORIGIN HTTP (no redirects followed) ==='
+          for domain in belastock.com.br www.belastock.com.br; do
+            for scheme in https http; do
+              if [ "$scheme" = https ]; then port=443; else port=80; fi
+              echo "Origin domain=$domain scheme=$scheme"
+              curl -k --resolve "$domain:$port:127.0.0.1" --noproxy '*' -sS \
+                --max-time 10 --max-redirs 0 -o /dev/null -D /tmp/bs_origin_headers \
+                -w 'ORIGIN_RESULT status=%{http_code} redirects=%{num_redirects}\n' "$scheme://$domain/" || true
+              grep -iE '^(HTTP/|location:|x-redirect-by:|server:)' /tmp/bs_origin_headers | head -8 || true
             done
           done
-          for root in \
-            /home/belastock/htdocs/belastock.com.br \
-            /home/wwwbelastock/htdocs/belastock.com.br \
-            /home/belastock/htdocs/www.belastock.com.br \
-            /home/belastock-loja/htdocs/loja.belastock.com.br; do
-            [ -f "$root/wp-config.php" ] || continue
-            echo "=== WP candidate: $root ==="
-            stat -c 'owner=%U group=%G' "$root" || true
-            for rel in wp-content/uploads/2024/05/camisa_225.webp wp-content/uploads/2024/05/camisa_10.webp wp-content/uploads/2024/04/Bela-Store-logo-2-768x225.png.webp; do
-              if [ -f "$root/$rel" ]; then echo "disk_media=present $rel"; else echo "disk_media=missing $rel"; fi
-            done
-            if command -v wp >/dev/null 2>&1; then
-              for option in home siteurl; do
-                echo -n "$option="
-                (cd "$root" && wp option get "$option" --allow-root --skip-plugins --skip-themes 2>/dev/null) || echo '<unavailable>'
-              done
-              echo -n 'attachments='
-              (cd "$root" && wp post list --post_type=attachment --post_status=inherit --format=count --allow-root --skip-plugins --skip-themes 2>/dev/null) || echo '<unavailable>'
-              echo -n 'uploads_dir='
-              if [ -d "$root/wp-content/uploads" ]; then echo present; else echo absent; fi
-            else
-              echo 'WP CLI not present'
-            fi
+          echo '=== WP canonical installation ==='
+          if [ ! -f "$root/wp-config.php" ]; then echo 'WP-config missing; stop'; exit 0; fi
+          for name in home siteurl upload_path upload_url_path; do
+            echo -n "WP_OPTION $name: "
+            (cd "$root" && wp option get "$name" --allow-root --skip-plugins --skip-themes 2>/dev/null) || echo '[not set]'
           done
-          echo 'Read-only diagnosis completed'
+          echo '=== WP paths and active identity ==='
+          (cd "$root" && wp theme list --status=active --field=name --allow-root --skip-plugins --skip-themes 2>/dev/null) || true
+          (cd "$root" && wp plugin list --status=active --field=name --allow-root --skip-plugins --skip-themes 2>/dev/null | head -50) || true
+          echo '=== WP local/old address references (counts only) ==='
+          (cd "$root" && wp db query "SELECT 'options_local' AS area, COUNT(*) AS total FROM $(wp db prefix --allow-root --skip-plugins --skip-themes)options WHERE option_value LIKE '%tracosnativos.local%' OR option_value LIKE '%localhost%'; SELECT 'postmeta_local' AS area,COUNT(*) AS total FROM $(wp db prefix --allow-root --skip-plugins --skip-themes)postmeta WHERE meta_value LIKE '%tracosnativos.local%' OR meta_value LIKE '%localhost%'; SELECT 'posts_local' AS area,COUNT(*) AS total FROM $(wp db prefix --allow-root --skip-plugins --skip-themes)posts WHERE post_content LIKE '%tracosnativos.local%' OR post_content LIKE '%localhost%';" --allow-root --skip-plugins --skip-themes 2>/dev/null) || echo 'Reference counts unavailable'
+          echo 'Read-only end'
           REMOTE
