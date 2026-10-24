@@ -1,0 +1,72 @@
+name: BelaStock - Diagnostico atual slider CSS e Elementor
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/diagnostico-banner-atual.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Inspect current WWW HTML + Elementor CSS
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import urllib.request,re
+          site='https://www.belastock.com.br/'
+          for url in (site,site+'wp-content/uploads/elementor/css/post-27.css'):
+            req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+            try:
+              with urllib.request.urlopen(req,timeout=18) as r: s=r.read().decode('utf-8','replace');status=r.status
+            except Exception as e: print('HTTP_ERROR',url,type(e).__name__,str(e)[:150]);continue
+            print('FILE',url,'status',status,'bytes',len(s),'matches','a5856ba=',s.count('a5856ba'),'90e5032=',s.count('90e5032'),'ed31c57=',s.count('ed31c57'))
+            if url.endswith('.css'):
+              for m in list(re.finditer(r'background-image\s*:\s*url\([^)]*\)',s))[:14]:
+                print('BG_CSS',s[max(0,m.start()-125):m.end()+100].replace('\n',' ')[:480])
+              for selector in ('a5856ba','ed31c57','90e5032'):
+                for m in list(re.finditer(selector,s))[:4]:print('SELECTOR_CSS',selector,s[max(0,m.start()-120):m.start()+390].replace('\n',' ')[:510])
+            else:
+              for m in list(re.finditer('elementor-widget-slides',s))[:3]:
+                print('SLIDE_HTML',s[max(0,m.start()-80):m.start()+1550].replace('\n',' ')[:1650])
+          PY
+      - name: Read-only WordPress saved slider state and attachment sources
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd /home/belastock/htdocs/belastock.com.br
+          wp eval '
+            $page=(int)get_option("page_on_front");echo "FRONT_ID=".$page.PHP_EOL;
+            $data=json_decode((string)get_post_meta($page,"_elementor_data",true),true);
+            $walker=function($items)use(&$walker){
+              foreach((array)$items as $item){
+                if(!is_array($item))continue;
+                if(($item["widgetType"]??"")==="slides"){
+                  echo "WIDGET_ID=".($item["id"]??"").PHP_EOL;
+                  foreach((array)($item["settings"]["slides"]??[]) as $slide){
+                    $ref=$slide["background_image"]??[];
+                    $id=(int)($ref["id"]??0);
+                    $file=$id?get_attached_file($id):"";
+                    echo "SLIDE_ID=".($slide["_id"]??"")." ATTACHMENT_ID=".$id." HAS_FILE=".($file&&is_file($file)?"yes":"no")." SAVED_URL=".($ref["url"]??"")." CANONICAL_URL=".($id?wp_get_attachment_url($id):"").PHP_EOL;
+                  }
+                }
+                if(!empty($item["elements"]))$walker($item["elements"]);
+              }
+            };$walker($data);
+          ' --allow-root --skip-plugins --skip-themes
+          test -f wp-content/uploads/elementor/css/post-27.css && stat -c 'CSS_MTIME=%y CSS_SIZE=%s' wp-content/uploads/elementor/css/post-27.css || true
+          grep -oE '.{0,110}(a5856ba|90e5032|ed31c57).{0,300}' wp-content/uploads/elementor/css/post-27.css 2>/dev/null | head -7 || true
+          echo 'AUDIT_BANNER_COMPLETE'
+          REMOTE
