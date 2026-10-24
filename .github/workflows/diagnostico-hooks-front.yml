@@ -1,0 +1,63 @@
+name: BelaStock - Identificar causa da pagina PHP vazia
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/diagnostico-hooks-front.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Inspect maintenance hooks, cache and theme without edits
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd /home/belastock/htdocs/belastock.com.br
+          echo '=== WORDPRESS CACHE AND MU PLUGINS ==='
+          for f in wp-content/advanced-cache.php wp-content/object-cache.php wp-content/mu-plugins wp-content/db.php .maintenance; do
+             if [ -e "$f" ]; then ls -ld "$f"; else echo "$f absent"; fi
+          done
+          if [ -d wp-content/mu-plugins ]; then find wp-content/mu-plugins -maxdepth 2 -type f -name '*.php' -printf '%P\n' | head -25; fi
+          echo '=== WP cache and maintenance values ==='
+          wp eval '
+            foreach(["WP_CACHE","WP_DEBUG","WP_HOME","WP_SITEURL","WP_USE_THEMES"] as $c)echo "CONSTANT_".$c."=".(defined($c)?(in_array($c,["WP_HOME","WP_SITEURL"])?constant($c):(constant($c)?"true":"false")):"undefined").PHP_EOL;
+            foreach(["blog_public","show_on_front","page_on_front","template","stylesheet"] as $k)echo "WP_OPTION_".$k."=".get_option($k).PHP_EOL;
+          ' --allow-root --skip-plugins --skip-themes
+          echo '=== THEME FUNCTION FILE ==='
+          wc -c wp-content/themes/hello-elementor/functions.php
+          echo '=== ACTIVE PLUGINS (names only) ==='
+          wp plugin list --status=active --field=name --allow-root --skip-plugins --skip-themes | head -50
+          echo '=== REQUEST HOOKS callback signatures ==='
+          wp eval '
+            global $wp_filter;
+            foreach(["plugins_loaded","init","parse_request","wp","template_redirect","template_include","rest_api_init","rest_pre_dispatch"] as $hook){
+              $arr=$wp_filter[$hook]??null;echo "HOOK=".$hook.PHP_EOL;
+              if(!$arr)continue;
+              $items=[];
+              foreach($arr->callbacks as $priority=>$events)foreach($events as $entry){
+                 $f=$entry["function"];
+                 if(is_string($f))$name=$f;
+                 elseif(is_array($f))$name=(is_object($f[0])?get_class($f[0]):$f[0])."::".$f[1];
+                 else $name="closure";
+                 if(preg_match("/(cache|maintenance|redirect|disable|block|coming|wp_die|template|output|close|site|elementor|woocommerce)/i",$name))$items[]=$priority.":".$name;
+              }
+              echo "MATCHING_CALLBACKS=".implode("|",array_slice($items,0,30)).PHP_EOL;
+            }
+          ' --allow-root
+          echo '=== NGINX CACHING DIRECTIVES ONLY ==='
+          grep -nE 'fastcgi_cache|proxy_cache|fastcgi_intercept_errors|gzip |sub_filter|return 200|empty_gif|fastcgi_param|proxy_set_header' /etc/nginx/sites-enabled/belastock.com.br.conf | head -60 || true
+          echo 'HOOK_DIAG_COMPLETE'
+          REMOTE
