@@ -1,0 +1,55 @@
+name: BelaStock - Verificar origem versus pagina publica
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/comparar-origem-live.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Check public page by HTTP
+        run: |
+          set -euo pipefail
+          curl -sS --max-time 20 -H 'Accept-Encoding: identity' -D /tmp/pub.headers -o /tmp/pub.html https://www.belastock.com.br/
+          echo "PUBLIC_BYTES=$(wc -c </tmp/pub.html)"
+          grep -ioE 'elementor-element-(a5856ba|90e5032)' /tmp/pub.html | sort | uniq -c || true
+          grep -iE '^(HTTP/|content-type:|content-length:|cf-cache-status:|x-cache:|server:)' /tmp/pub.headers | head -18 || true
+      - name: Check direct Nginx origin and backend on VPS
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          dir=$(mktemp -d)
+          trap 'rm -rf "$dir"' EXIT
+          echo '=== ORIGIN LOCAL HTTPS ==='
+          curl -sk --noproxy '*' --resolve www.belastock.com.br:443:127.0.0.1 --max-time 20 -H 'Accept-Encoding: identity' -D "$dir/nginx.headers" -o "$dir/nginx.html" -w 'NGINX_HTTP=%{http_code} SIZE=%{size_download}\n' https://www.belastock.com.br/
+          echo '=== PHP PORT 8080 ==='
+          curl -s -H 'Host: www.belastock.com.br' --max-time 20 -H 'Accept-Encoding: identity' -D "$dir/backend.headers" -o "$dir/backend.html" -w 'BACKEND_HTTP=%{http_code} SIZE=%{size_download}\n' http://127.0.0.1:8080/
+          echo '=== VPS CALL TO PUBLIC CF ==='
+          curl -sS --max-time 20 -H 'Accept-Encoding: identity' -D "$dir/public.headers" -o "$dir/public.html" -w 'PROXIED_HTTP=%{http_code} SIZE=%{size_download}\n' https://www.belastock.com.br/
+          for mode in nginx backend public; do
+            echo "=== BODY $mode ==="
+            if [ -f "$dir/$mode.html" ]; then
+              wc -c "$dir/$mode.html"
+              for id in a5856ba 90e5032 ed31c57; do
+                echo -n "COUNT $id="
+                (grep -ao "$id" "$dir/$mode.html" || true) | wc -l
+              done
+            fi
+            grep -iE '^(HTTP/|content-type:|content-encoding:|content-length:|cf-cache-status:|cache-control:|x-cache:|server:)' "$dir/$mode.headers" | head -10 || true
+          done
+          echo 'SOURCE_COMPARISON_COMPLETE'
+          REMOTE
