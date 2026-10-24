@@ -78,5 +78,15 @@ jobs:
           echo '=== Backup tooling available ==='
           if command -v rclone >/dev/null 2>&1; then echo 'rclone=installed'; rclone listremotes 2>/dev/null | sed 's/.$//' | head -12 || true; else echo 'rclone=absent'; fi
           if command -v mysqldump >/dev/null 2>&1; then echo 'mysqldump=installed'; else echo 'mysqldump=absent'; fi
+          echo '=== Exact legacy counts via WP-CLI dry run ==='
+          (cd "$root" && wp search-replace 'tracosnativos.local' 'www.belastock.com.br' --all-tables-with-prefix --dry-run --precise --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes 2>/dev/null) || echo 'Dry run unavailable'
+          echo '=== Plugin legacy references with two lines context ==='
+          if [ -f "$root/wp-content/plugins/belastock-ai-admin/belastock-ai-admin.php" ]; then
+             grep -n -C 2 'tracosnativos\.local' "$root/wp-content/plugins/belastock-ai-admin/belastock-ai-admin.php" | head -55 || true
+          fi
+          echo '=== WP config identity overrides (names only) ==='
+          if grep -qE 'WP_HOME|WP_SITEURL' "$root/wp-config.php"; then grep -nE 'WP_HOME|WP_SITEURL' "$root/wp-config.php" | sed -E "s/(WP_HOME|WP_SITEURL)['\\\", ]+,.*;/\1 (configured, value redacted);/" | head -12; fi
+          echo '=== Nginx first server block (redacted certificate paths) ==='
+          if [ -f "$conf" ]; then head -16 "$conf" | sed -E 's@(/etc/letsencrypt|/etc/ssl|/home/)[^; ]+@[redacted-path]@g'; fi
           echo 'Read-only end'
           REMOTE
