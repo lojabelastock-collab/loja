@@ -1,0 +1,123 @@
+name: BelaStock - Reparar Elementor banners por anexos locais
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/restaurar-banners-elementor.yml']
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - name: Backup A B external of original Elementor metadata
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "$USER@$HOST" "cd /home/belastock/htdocs/belastock.com.br && wp eval 'echo get_post_meta(27,\"_elementor_data\",true);' --allow-root --skip-plugins --skip-themes" > "$RUNNER_TEMP/bs-elementor-original.json"
+          test "$(wc -c < "$RUNNER_TEMP/bs-elementor-original.json")" -gt 10000
+          python3 -m json.tool "$RUNNER_TEMP/bs-elementor-original.json" > /dev/null
+          export BS_RESTORE_PASSWORD
+          BS_RESTORE_PASSWORD=$(printf '%s%s' "$KEY" 'belastock-elementor-page27-20261024' | sha256sum | cut -d' ' -f1)
+          for letter in A B; do
+            openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BS_RESTORE_PASSWORD -in "$RUNNER_TEMP/bs-elementor-original.json" -out "$RUNNER_TEMP/bs-elementor-$letter.enc"
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BS_RESTORE_PASSWORD -in "$RUNNER_TEMP/bs-elementor-$letter.enc" | python3 -m json.tool > /dev/null
+          done
+          echo 'ELEMENTOR_BACKUPS_A_B_VALID'
+      - name: Save external backup A
+        uses: actions/upload-artifact@v4
+        with:
+          name: belastock-elementor-original-A
+          path: ${{ runner.temp }}/bs-elementor-A.enc
+          retention-days: 90
+          if-no-files-found: error
+      - name: Save external backup B
+        uses: actions/upload-artifact@v4
+        with:
+          name: belastock-elementor-original-B
+          path: ${{ runner.temp }}/bs-elementor-B.enc
+          retention-days: 90
+          if-no-files-found: error
+      - name: Update just local verified image references in homepage widgets
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd /home/belastock/htdocs/belastock.com.br
+          wp eval '
+            $page=(int)get_option("page_on_front");
+            if($page!==27)WP_CLI::error("Unexpected home page");
+            $original=(string)get_post_meta($page,"_elementor_data",true);
+            $data=json_decode($original,true);
+            if(!is_array($data))WP_CLI::error("Invalid Elementor metadata");
+            $slides=0;$changed=0;
+            $walk=function(&$items)use(&$walk,&$slides,&$changed){
+              foreach($items as &$item){
+                if(!is_array($item))continue;
+                if(($item["widgetType"]??"")==="slides"){
+                  foreach($item["settings"]["slides"] as &$slide){
+                    $id=(int)($slide["background_image"]["id"]??0);
+                    if(!in_array($id,[18308,18312],true))WP_CLI::error("Unexpected banner ID");
+                    if(!is_file((string)get_attached_file($id)))WP_CLI::error("Banner file missing");
+                    $url=(string)wp_get_attachment_url($id);
+                    if(strpos($url,"https://www.belastock.com.br/wp-content/uploads/")!==0)WP_CLI::error("Unexpected banner URL");
+                    $slides++;
+                    if(($slide["background_image"]["url"]??"")!==$url){$slide["background_image"]["url"]=$url;$changed++;}
+                  }
+                  unset($slide);
+                }
+                if(($item["widgetType"]??"")==="image"){
+                  $id=(int)($item["settings"]["image"]["id"]??0);
+                  $url=(string)($item["settings"]["image"]["url"]??"");
+                  if($id && is_file((string)get_attached_file($id)) && strpos($url,"localhost")!==false){
+                    $current=(string)wp_get_attachment_url($id);
+                    if(strpos($current,"https://www.belastock.com.br/wp-content/uploads/")===0){$item["settings"]["image"]["url"]=$current;$changed++;}
+                  }
+                }
+                if(!empty($item["elements"])&&is_array($item["elements"]))$walk($item["elements"]);
+              }
+              unset($item);
+            };
+            $walk($data);
+            if($slides!==2)WP_CLI::error("Expected exactly two slides");
+            $encoded=wp_json_encode($data,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+            if(!$encoded)WP_CLI::error("Invalid JSON");
+            if($changed){
+              update_post_meta($page,"_elementor_data",wp_slash($encoded));
+              if(!is_array(json_decode((string)get_post_meta($page,"_elementor_data",true),true)))WP_CLI::error("Failed readback");
+            }
+            echo "SLIDE_COUNT=$slides REFERENCES_UPDATED=$changed".PHP_EOL;
+          ' --allow-root --skip-plugins --skip-themes
+          wp cache flush --allow-root --skip-plugins --skip-themes
+          wp eval 'if(class_exists("\\Elementor\\Plugin")){\Elementor\Plugin::$instance->files_manager->clear_cache();echo "ELEMENTOR_CSS_RESET=yes".PHP_EOL;}' --allow-root
+          echo 'BANNERS_RELINKED_TO_ORIGINAL_VPS_FILES'
+          REMOTE
+      - name: Verify original WordPress images on target domain URLs
+        run: |
+          set -euo pipefail
+          for u in \
+            https://www.belastock.com.br/wp-content/uploads/2026/10/f97c2fc8-b817-437e-9957-6a7f5524dd2f-1.png \
+            https://www.belastock.com.br/wp-content/uploads/2026/10/cc612db5-50c4-4c72-8d2f-5cad9beb1824.png; do
+             status=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' "$u")
+             echo "PUBLIC_BANNER_STATUS=$status"
+          done
