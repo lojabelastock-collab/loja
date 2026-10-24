@@ -1,0 +1,57 @@
+name: BelaStock - Diagnostico PHP HTTP da VPS correta
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/diagnostico-php-www.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Inspect local WordPress HTTP and PHP health without modifying services
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          root=/home/belastock/htdocs/belastock.com.br
+          test -f "$root/wp-config.php"
+          echo '=== PHP / WORDPRESS RESPONSE PATHS ==='
+          for path in / /index.php /wp-login.php /wp-json/ /?rest_route=/ /wp-admin/admin-ajax.php /wp-content/uploads/2024/05/camisa_225.webp; do
+            echo "URL_PATH=$path"
+            curl -sk --noproxy '*' --resolve www.belastock.com.br:443:127.0.0.1 \
+               --max-time 15 -H 'Accept-Encoding: identity' -o /dev/null \
+               -w 'HTTPS_ORIGIN_STATUS=%{http_code} SIZE=%{size_download} TYPE=%{content_type} REDIRECTS=%{num_redirects}\n' \
+               "https://www.belastock.com.br$path" || true
+          done
+          echo '=== LOCAL BACKEND PHP ==='
+          for path in / /index.php /wp-json/ /wp-content/uploads/2024/05/camisa_225.webp; do
+            curl -s -H 'Host: www.belastock.com.br' --max-time 12 -o /dev/null -w 'BACKEND_PATH='"$path"' STATUS=%{http_code} BYTES=%{size_download} TYPE=%{content_type}\n' "http://127.0.0.1:8080$path" || true
+          done
+          echo '=== HOSTING CONFIG PATHS ==='
+          grep -nE '^\s*(fastcgi_pass|proxy_pass|root |server_name|location [^ ]+|try_files|return |rewrite )' /etc/nginx/sites-enabled/belastock.com.br.conf | head -45 || true
+          echo '=== THEME CORE CHECK ==='
+          cd "$root"
+          wp eval 'echo "WP_READY=yes THEME=".get_stylesheet()." FRONT=".get_option("page_on_front")." PHP=".PHP_VERSION.PHP_EOL;' --allow-root
+          echo '=== SERVICE HEALTH ==='
+          ps -eo comm,args | grep -E 'php-fpm: master process|nginx: master process' | grep -v grep | head -7 || true
+          echo '=== PHP/NGINX ERRORS (last 15 matching events, no query parameters) ==='
+          for f in /var/log/nginx/error.log /home/belastock/logs/error.log /home/belastock/logs/php.error.log; do
+            if [ -r "$f" ]; then
+              echo "LOG=$f"
+              tail -n 150 "$f" | grep -Ei 'fatal error|uncaught|upstream prematurely|primary script unknown|fastcgi|php warning|memory exhausted' | tail -n 15 | sed -E 's/((password|token|key|secret)=)[^ &"]+/\1[REDACTED]/Ig' || true
+            fi
+          done
+          echo 'PHP_DIAG_COMPLETE'
+          REMOTE
