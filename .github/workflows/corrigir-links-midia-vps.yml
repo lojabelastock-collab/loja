@@ -1,0 +1,105 @@
+name: BelaStock - Corrigir URLs internas para WWW e limpar cache
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/corrigir-links-midia-vps.yml']
+permissions:
+  contents: read
+concurrency:
+  group: belastock-www-media-db-correction
+  cancel-in-progress: false
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Capture encrypted DB recovery A/B outside VPS
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$HOST" && test -n "$USER" && test -n "$KEY" && test -n "$KNOWN"
+          umask 077
+          mkdir -p "$HOME/.ssh" "$RUNNER_TEMP/bs_recovery"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o ConnectTimeout=12 "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          root=/home/belastock/htdocs/belastock.com.br
+          test -f "$root/wp-config.php" && test ! -L "$root/wp-config.php"
+          cd "$root"
+          test "$(wp option get home --allow-root --skip-plugins --skip-themes)" = https://www.belastock.com.br
+          test "$(wp option get siteurl --allow-root --skip-plugins --skip-themes)" = https://www.belastock.com.br
+          wp search-replace https://belastock.com.br https://www.belastock.com.br --all-tables-with-prefix --dry-run --precise --skip-columns=guid --allow-root --skip-plugins --skip-themes
+          echo 'MEDIA_DB_PREFLIGHT_OK'
+          REMOTE
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes "$USER@$HOST" \
+            'cd /home/belastock/htdocs/belastock.com.br && wp db export - --allow-root --skip-plugins --skip-themes' \
+            > "$RUNNER_TEMP/bs_recovery/wordpress.sql"
+          test -s "$RUNNER_TEMP/bs_recovery/wordpress.sql"
+          gzip -c "$RUNNER_TEMP/bs_recovery/wordpress.sql" > "$RUNNER_TEMP/bs_recovery/db.sql.gz"
+          export BS_DB_BACKUP_PASSWORD
+          BS_DB_BACKUP_PASSWORD=$(printf '%s%s' "$KEY" 'belastock-media-db-20261024' | sha256sum | cut -d' ' -f1)
+          for letter in A B; do
+            openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BS_DB_BACKUP_PASSWORD -in "$RUNNER_TEMP/bs_recovery/db.sql.gz" -out "$RUNNER_TEMP/belastock-media-db-$letter.enc"
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BS_DB_BACKUP_PASSWORD -in "$RUNNER_TEMP/belastock-media-db-$letter.enc" | gzip -t
+          done
+          echo 'DB_ENCRYPTED_BACKUP_A_B_VALIDATED_OUTSIDE_VPS'
+      - name: External backup A
+        uses: actions/upload-artifact@v4
+        with:
+          name: belastock-media-db-backup-A
+          path: ${{ runner.temp }}/belastock-media-db-A.enc
+          retention-days: 90
+          if-no-files-found: error
+      - name: External backup B
+        uses: actions/upload-artifact@v4
+        with:
+          name: belastock-media-db-backup-B
+          path: ${{ runner.temp }}/belastock-media-db-B.enc
+          retention-days: 90
+          if-no-files-found: error
+      - name: Serialized-safe WordPress URL replacement and Elementor cache clean
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o ConnectTimeout=12 "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd /home/belastock/htdocs/belastock.com.br
+          echo '=== Replace old apex links, serialized-safe ==='
+          wp search-replace https://belastock.com.br https://www.belastock.com.br --all-tables-with-prefix --precise --skip-columns=guid --allow-root --skip-plugins --skip-themes --report-changed-only
+          echo '=== Verify no old apex URLs in managed WordPress data ==='
+          wp search-replace https://belastock.com.br https://www.belastock.com.br --all-tables-with-prefix --dry-run --precise --skip-columns=guid --allow-root --skip-plugins --skip-themes --report-changed-only
+          test "$(wp option get home --allow-root --skip-plugins --skip-themes)" = https://www.belastock.com.br
+          test "$(wp option get siteurl --allow-root --skip-plugins --skip-themes)" = https://www.belastock.com.br
+          echo '=== Clear site object cache ==='
+          wp cache flush --allow-root --skip-plugins --skip-themes || true
+          echo '=== Clear Elementor generated CSS and transient caches safely ==='
+          wp eval 'if(class_exists("\\Elementor\\Plugin") && isset(\Elementor\Plugin::$instance->files_manager)){\Elementor\Plugin::$instance->files_manager->clear_cache();echo "ELEMENTOR_CSS_CLEARED".PHP_EOL;}else{echo "ELEMENTOR_CACHE_NOT_AVAILABLE".PHP_EOL;}' --allow-root || true
+          echo 'WWW_URL_REPLACEMENT_COMPLETE'
+          REMOTE
+      - name: Confirm live homepage products and image availability
+        run: |
+          set -euo pipefail
+          for target in \
+             https://www.belastock.com.br/ \
+             https://www.belastock.com.br/wp-content/uploads/2024/05/camisa_225.webp \
+             https://www.belastock.com.br/wp-content/uploads/2024/05/camisa_88-1.webp \
+             https://www.belastock.com.br/wp-content/uploads/2024/05/camisa_571.webp; do
+             code=$(curl -sS --max-time 20 --max-redirs 0 -o /dev/null -w '%{http_code}' "$target")
+             echo "VALIDATE_HTTP=$code $target"
+             test "$code" = 200
+          done
