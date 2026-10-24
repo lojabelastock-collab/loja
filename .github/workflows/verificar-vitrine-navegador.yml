@@ -1,0 +1,66 @@
+name: BelaStock - Navegador real testar vitrine
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/verificar-vitrine-navegador.yml']
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Browser engine readiness
+        run: |
+          set -euo pipefail
+          echo "CHROME_PATH=$(command -v google-chrome-stable || command -v google-chrome || true)"
+          echo "NODE_VERSION=$(node --version)"
+          npm install --no-audit --no-fund --silent --prefix "$RUNNER_TEMP/bs-browser" playwright
+      - name: Browser inspect product images slider errors
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/bs-browser/audit.cjs" <<'JS'
+          const {chromium}=require('playwright');
+          (async()=>{
+            const browser=await chromium.launch({headless:true,channel:'chrome',args:['--no-sandbox','--disable-dev-shm-usage']});
+            const page=await browser.newPage({viewport:{width:1366,height:1000},deviceScaleFactor:1});
+            const failed=[],messages=[];
+            page.on('response',r=>{if(r.status()>=400&&failed.length<40)failed.push({status:r.status(),url:r.url().slice(0,240)})});
+            page.on('requestfailed',req=>{if(failed.length<40)failed.push({failed:req.failure(),url:req.url().slice(0,230)})});
+            page.on('console',msg=>{if(msg.type()==='error'&&messages.length<30)messages.push(msg.text().slice(0,260))});
+            page.on('pageerror',err=>{if(messages.length<30)messages.push('PAGEERR '+err.message.slice(0,240))});
+            const response=await page.goto('https://www.belastock.com.br/',{waitUntil:'domcontentloaded',timeout:45000});
+            await page.waitForTimeout(9000);
+            for(const y of [700,1450,2200,3000]){await page.evaluate(v=>window.scrollTo(0,v),y);await page.waitForTimeout(450)}
+            await page.evaluate(()=>window.scrollTo(0,0));
+            await page.waitForTimeout(2000);
+            const summary=await page.evaluate(()=>{
+              const imgs=[...document.images].map((el,i)=>({
+                i,alt:el.alt,src:el.currentSrc||el.src,complete:el.complete,naturalWidth:el.naturalWidth,
+                display:getComputedStyle(el).display,visibility:getComputedStyle(el).visibility,opacity:getComputedStyle(el).opacity,
+                parent:el.parentElement?.className?.toString().slice(0,120)
+              }));
+              const sliderSelectors=['rs-module','rs-slides','rs-slide','.rev_slider','.rev_slider_wrapper','.revslider-initialised','.tp-revslider-mainul','.rs-module-wrap','.elementor-widget-slider_revolution','.elementor-widget-slider-revolution'];
+              const sliders={};
+              for(const sel of sliderSelectors){
+                const matched=[...document.querySelectorAll(sel)];
+                if(matched.length)sliders[sel]=matched.slice(0,5).map(e=>({
+                  id:e.id,cls:e.className?.toString().slice(0,120),
+                  rect:{w:Math.round(e.getBoundingClientRect().width),h:Math.round(e.getBoundingClientRect().height)},
+                  style:{display:getComputedStyle(e).display,visibility:getComputedStyle(e).visibility,opacity:getComputedStyle(e).opacity,background:getComputedStyle(e).backgroundImage},
+                  html:e.outerHTML.slice(0,380)
+                }));
+              }
+              const imagesBroken=imgs.filter(x=>x.naturalWidth===0);
+              const imagesInvisible=imgs.filter(x=>x.naturalWidth>0&&(x.display==='none'||x.opacity==='0'||x.visibility==='hidden'));
+              const bg=[...document.querySelectorAll('*')].filter(e=>{const b=getComputedStyle(e).backgroundImage;return b&&b.includes('url(')}).slice(0,15).map(e=>({tag:e.tagName,id:e.id,cls:e.className?.toString().slice(0,100),bg:getComputedStyle(e).backgroundImage.slice(0,190)}));
+              return {title:document.title,href:location.href,imageCount:imgs.length,imagesBroken,imagesInvisible,productImages:imgs.filter(x=>x.src.includes('/2024/05/camisa_')).slice(0,28),sliders,backgrounds:bg};
+            });
+            console.log('BROWSER_HTTP',response.status());
+            console.log('BROWSER_SUMMARY',JSON.stringify(summary).slice(0,20000));
+            console.log('BROWSER_ERRORS',JSON.stringify(failed));
+            console.log('BROWSER_CONSOLE',JSON.stringify(messages));
+            await browser.close();
+          })().catch(e=>{console.error('BROWSER_EXCEPTION',e);process.exit(1)});
+          JS
+          node "$RUNNER_TEMP/bs-browser/audit.cjs"
