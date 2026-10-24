@@ -88,5 +88,11 @@ jobs:
           if grep -qE 'WP_HOME|WP_SITEURL' "$root/wp-config.php"; then grep -nE 'WP_HOME|WP_SITEURL' "$root/wp-config.php" | sed -E "s/(WP_HOME|WP_SITEURL)['\\\", ]+,.*;/\1 (configured, value redacted);/" | head -12; fi
           echo '=== Nginx first server block (redacted certificate paths) ==='
           if [ -f "$conf" ]; then head -16 "$conf" | sed -E 's@(/etc/letsencrypt|/etc/ssl|/home/)[^; ]+@[redacted-path]@g'; fi
+          echo '=== Effective Nginx loaded configurations (filenames only) ==='
+          nginx -T 2>&1 | grep -E '^# configuration file /etc/nginx/.*(belastock|sites-enabled/)' | grep -E '(belastock|sites-enabled)' | head -30 || true
+          echo '=== Nginx syntax validation and conflicting server_name warnings ==='
+          nginx -t 2>&1 | grep -E 'conflicting server name|test is|syntax is' | head -20 || true
+          echo '=== WP current upload URL sample ==='
+          (cd "$root" && wp eval 'echo wp_get_upload_dir()["baseurl"].PHP_EOL;' --allow-root --skip-plugins --skip-themes 2>/dev/null) || true
           echo 'Read-only end'
           REMOTE
