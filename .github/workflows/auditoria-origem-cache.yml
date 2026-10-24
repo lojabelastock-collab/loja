@@ -1,0 +1,59 @@
+name: BelaStock - Origem versus cache da pagina inicial
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/auditoria-origem-cache.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Inspect public HTTP cache headers and page IDs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import urllib.request,re
+          for url in ('https://www.belastock.com.br/','https://www.belastock.com.br/?bs_cache_audit=20261024'):
+            try:
+              with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'}),timeout=20) as r:
+                s=r.read().decode('utf-8','replace')
+                h=r.headers
+                print('PUBLIC',url,'STATUS',r.status,'LENGTH',len(s),'A5856BA',s.count('a5856ba'),'90E5032',s.count('90e5032'),'WP_ADMIN_BAR',s.count('id="wpadminbar"'),'CACHE_CONTROL',h.get('cache-control'),'CF_CACHE_STATUS',h.get('cf-cache-status'),'X_CACHE',h.get('x-cache'))
+            except Exception as e:print('PUBLIC_ERROR',str(e)[:140])
+          PY
+      - name: Inspect origin HTTP without Cloudflare (no data changes)
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          test -f /home/belastock/htdocs/belastock.com.br/wp-config.php
+          for uri in / '/?bs_cache_audit=20261024'; do
+            echo "=== ORIGIN_URI=$uri ==="
+            curl -sk --noproxy '*' --resolve www.belastock.com.br:443:127.0.0.1 --max-time 20 -D /dev/stderr "https://www.belastock.com.br$uri" \
+              | python3 -c 'import sys; s=sys.stdin.read(); print("ORIGIN_HTML_CHARS=",len(s),"A5856BA=",s.count("a5856ba"),"90E5032=",s.count("90e5032"),"WPADMINBAR=",s.count("id=\"wpadminbar\""),"BANNER_BG_IDS=",s.count("f97c2fc8"))' || true
+          done
+          cd /home/belastock/htdocs/belastock.com.br
+          echo '=== WORDPRESS FRONTEND CONTENT ID ==='
+          wp eval '
+            $id=(int)get_option("page_on_front");
+            $p=get_post($id);
+            echo "POST_ID=".$id." POST_MODIFIED=".($p?$p->post_modified_gmt:"").PHP_EOL;
+            $data=(string)get_post_meta($id,"_elementor_data",true);
+            echo "ELEMENTOR_META_BYTES=".strlen($data)." OLD_ID=".substr_count($data,"a5856ba")." NEW_ID=".substr_count($data,"90e5032").PHP_EOL;
+            $content=(string)($p?$p->post_content:"");
+            echo "POST_CONTENT_BYTES=".strlen($content)." OLD_ID=".substr_count($content,"a5856ba")." NEW_ID=".substr_count($content,"90e5032").PHP_EOL;
+          ' --allow-root --skip-plugins --skip-themes
+          echo 'CACHE_AUDIT_COMPLETE'
+          REMOTE
