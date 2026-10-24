@@ -1,0 +1,73 @@
+name: BelaStock - Auditoria dos slides do Elementor
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/auditar-slides-elementor.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Read homepage Elementor slides and media references
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd /home/belastock/htdocs/belastock.com.br
+          wp eval '
+            $page=(int)get_option("page_on_front");
+            $all=json_decode((string)get_post_meta($page,"_elementor_data",true),true);
+            $walk=function($rows)use(&$walk){
+              foreach($rows as $row){
+                if(!is_array($row))continue;
+                if(($row["widgetType"]??"")==="slides"){
+                  $s=$row["settings"]??[];
+                  echo "SLIDER_WIDGET_ID=".($row["id"]??"")." SETTINGS=".implode(",",array_keys($s)).PHP_EOL;
+                  $slides=$s["slides"]??[];
+                  echo "SLIDE_COUNT=".count((array)$slides).PHP_EOL;
+                  foreach((array)$slides as $i=>$slide){
+                    $img=$slide["background_image"]??[];
+                    $url=is_array($img)?($img["url"]??""):"";
+                    $id=is_array($img)?($img["id"]??""):"";
+                    $path=parse_url((string)$url,PHP_URL_PATH)??"";
+                    $uploads=wp_get_upload_dir();
+                    $relative=strpos($path,"/wp-content/uploads/")===0?substr($path,strlen("/wp-content/uploads/")):"";
+                    $file=$relative?($uploads["basedir"]."/".$relative):"";
+                    echo "SLIDE $i title=".substr((string)($slide["heading"]??""),0,55)." bg=".substr((string)$url,0,230)." attachment_id=$id original_file=".($file&&is_file($file)?"yes":"no")." img_attachment_file=".($id&&is_file(get_attached_file((int)$id))?"yes":"no").PHP_EOL;
+                    echo "SLIDE_CONFIG_KEYS=".implode(",",array_keys((array)$slide)).PHP_EOL;
+                  }
+                }
+                if(!empty($row["elements"])&&is_array($row["elements"]))$walk($row["elements"]);
+              }
+            };
+            if(is_array($all))$walk($all);
+            echo "=== ALL ELEMENTOR HOMEPAGE IMAGE WIDGETS ===".PHP_EOL;
+            $walk2=function($rows)use(&$walk2){
+              foreach($rows as $row){
+                if(!is_array($row))continue;
+                if(($row["widgetType"]??"")==="image"){
+                  $im=$row["settings"]["image"]??[];
+                  $url=is_array($im)?($im["url"]??""):"";$id=is_array($im)?($im["id"]??""):"";
+                  echo "WIDGET_IMG id=".($row["id"]??"")." attachment_id=$id url=".substr((string)$url,0,225).PHP_EOL;
+                }
+                if(!empty($row["elements"])&&is_array($row["elements"]))$walk2($row["elements"]);
+              }
+            };
+            if(is_array($all))$walk2($all);
+          ' --allow-root --skip-plugins --skip-themes
+          echo '=== Common available wide-format banners from uploads ==='
+          find wp-content/uploads -type f \( -iname '*BANNER*1536*595*' -o -iname '*banner*1920*' -o -iname '*slide*' \) -printf '%P\n' 2>/dev/null | head -22 || true
+          echo 'SLIDE_INSPECTION_COMPLETE'
+          REMOTE
