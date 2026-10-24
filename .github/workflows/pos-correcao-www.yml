@@ -1,0 +1,64 @@
+name: BelaStock WWW - Auditoria final de URLs e biblioteca
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/pos-correcao-www.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: HTTP canonical and media no redirect
+        run: |
+          set -euo pipefail
+          for url in https://www.belastock.com.br/ https://www.belastock.com.br/wp-content/uploads/2024/05/camisa_225.webp; do
+            curl -sS --max-time 18 --max-redirs 0 -o /dev/null -w 'PUBLIC_URL %{http_code} %{url_effective} redirects=%{num_redirects}\n' "$url"
+          done
+      - name: Read-only WP CLI full audit
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          root=/home/belastock/htdocs/belastock.com.br
+          conf=/etc/nginx/sites-enabled/belastock.com.br.conf
+          cd "$root"
+          echo "SITE_HOME=$(wp option get home --allow-root --skip-plugins --skip-themes)"
+          echo "SITE_URL=$(wp option get siteurl --allow-root --skip-plugins --skip-themes)"
+          echo -n 'UPLOAD_BASE='
+          wp eval 'echo wp_get_upload_dir()["baseurl"].PHP_EOL;' --allow-root --skip-plugins --skip-themes
+          test "$(wp option get home --allow-root --skip-plugins --skip-themes)" = 'https://www.belastock.com.br'
+          test "$(wp option get siteurl --allow-root --skip-plugins --skip-themes)" = 'https://www.belastock.com.br'
+          echo '=== Origin root ==='
+          curl -sk --noproxy '*' --resolve www.belastock.com.br:443:127.0.0.1 --max-redirs 0 -o /dev/null -w 'WWW_ORIGIN status=%{http_code} redirects=%{num_redirects}\n' https://www.belastock.com.br/
+          echo '=== Exact legacy in WordPress database ==='
+          wp search-replace tracosnativos.local www.belastock.com.br --all-tables-with-prefix --dry-run --precise --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes
+          echo '=== Old domain in source files (count only) ==='
+          count=$(grep -rl 'tracosnativos[.]local' wp-config.php wp-content/plugins wp-content/themes --include='*.php' --include='*.js' --include='*.css' 2>/dev/null | wc -l || true)
+          echo "LEGACY_SOURCE_FILES=$count"
+          echo '=== WooCommerce attachment records and locally missing originals ==='
+          wp eval '
+            $ids=get_posts(["post_type"=>"attachment","post_status"=>"inherit","posts_per_page"=>1500,"fields"=>"ids"]);
+            $missing=0;$present=0;$remote=0;$examples=[];
+            foreach($ids as $id){
+              $f=get_attached_file($id);
+              if($f && is_file($f))$present++;
+              elseif($f && preg_match("~^https?://~",$f))$remote++;
+              else{$missing++;if(count($examples)<6)$examples[]=$id;}
+            }
+            echo "ATTACHMENTS_TOTAL=".count($ids)." PRESENT=".$present." MISSING_LOCAL=".$missing." REMOTE=".$remote.PHP_EOL;
+            echo "MISSING_EXAMPLES_IDS=".implode(",",$examples).PHP_EOL;
+          ' --allow-root --skip-plugins --skip-themes
+          echo 'AUDIT_END'
+          REMOTE
