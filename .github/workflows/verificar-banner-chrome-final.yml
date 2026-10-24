@@ -1,0 +1,48 @@
+name: BelaStock - Validar banner novo no Chrome
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/verificar-banner-chrome-final.yml']
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Install transient Playwright for browser confirmation
+        run: npm install --silent --no-fund --no-audit --prefix "$RUNNER_TEMP/check-bs" playwright
+      - name: Open public site and verify computed image background
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/check-bs/verify.cjs" <<'JS'
+          const {chromium}=require('playwright');
+          (async()=>{
+            const browser=await chromium.launch({channel:'chrome',headless:true,args:['--no-sandbox']});
+            const page=await browser.newPage({viewport:{width:1366,height:900}});
+            const failed=[];
+            page.on('response',r=>{if(r.status()>=400&&failed.length<20)failed.push([r.status(),r.url()])});
+            const r=await page.goto('https://www.belastock.com.br/',{waitUntil:'domcontentloaded',timeout:35000});
+            await page.waitForTimeout(5500);
+            const result=await page.evaluate(()=>{
+              const el=document.querySelector('.elementor-element-a5856ba .elementor-repeater-item-ed31c57 .swiper-slide-bg');
+              const css=el?getComputedStyle(el):null;
+              const imgs=[...document.images];
+              return {
+                sliderPresent:!!el,
+                bannerBackground:css?.backgroundImage||'none',
+                bannerWidth:el?Math.round(el.getBoundingClientRect().width):0,
+                imageCount:imgs.length,
+                imagesBroken:imgs.filter(e=>e.complete&&e.naturalWidth===0).map(e=>e.currentSrc||e.src),
+                productImagesLoaded:imgs.filter(e=>(e.currentSrc||e.src).includes('/2024/05/camisa_')&&e.naturalWidth>0).length,
+                marker:!!document.getElementById('wp-custom-css')||document.documentElement.outerHTML.includes('BelaStock local homepage banner 20261024')
+              };
+            });
+            console.log('PAGE_HTTP='+r.status());
+            console.log('BANNER_RENDER='+JSON.stringify(result));
+            console.log('FAILED_NETWORK='+JSON.stringify(failed));
+            await browser.close();
+            if(r.status()!==200||!result.sliderPresent||!result.bannerBackground.includes('f97c2fc8-b817-437e-9957-6a7f5524dd2f.png'))process.exitCode=1;
+          })().catch(err=>{console.error('BROWSER_FAILED',err.message);process.exitCode=1});
+          JS
+          node "$RUNNER_TEMP/check-bs/verify.cjs"
