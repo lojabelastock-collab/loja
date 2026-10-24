@@ -1,0 +1,150 @@
+name: BelaStock WWW - Backup A B e correcao de origem
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/corrigir-www-canonico.yml']
+permissions:
+  contents: read
+concurrency:
+  group: belastock-www-origin-only
+  cancel-in-progress: false
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Capture encrypted recovery package OUTSIDE VPS
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$HOST" && test -n "$USER" && test -n "$KEY" && test -n "$KNOWN"
+          umask 077
+          mkdir -p "$HOME/.ssh" "$RUNNER_TEMP/bs_recovery"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" \
+            'test -f /home/belastock/htdocs/belastock.com.br/wp-config.php && test -f /etc/nginx/sites-enabled/belastock.com.br.conf && nginx -t'
+          scp -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "$USER@$HOST:/etc/nginx/sites-enabled/belastock.com.br.conf" "$RUNNER_TEMP/bs_recovery/nginx.conf"
+          scp -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "$USER@$HOST:/home/belastock/htdocs/belastock.com.br/wp-config.php" "$RUNNER_TEMP/bs_recovery/wp-config.php"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" \
+            'cd /home/belastock/htdocs/belastock.com.br && wp db export - --allow-root --skip-plugins --skip-themes' \
+            > "$RUNNER_TEMP/bs_recovery/database.sql"
+          test -s "$RUNNER_TEMP/bs_recovery/database.sql"
+          grep -Eq '^--|^CREATE TABLE|^INSERT INTO|^/\*' "$RUNNER_TEMP/bs_recovery/database.sql"
+          tar -C "$RUNNER_TEMP/bs_recovery" -czf "$RUNNER_TEMP/bs_recovery.tar.gz" nginx.conf wp-config.php database.sql
+          export BS_BACKUP_PASSPHRASE
+          BS_BACKUP_PASSPHRASE=$(printf '%s:%s' "$KEY" 'belastock-www-AB-20261024' | sha256sum | cut -d' ' -f1)
+          openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BS_BACKUP_PASSPHRASE -in "$RUNNER_TEMP/bs_recovery.tar.gz" -out "$RUNNER_TEMP/bs-config-A.enc"
+          openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BS_BACKUP_PASSPHRASE -in "$RUNNER_TEMP/bs_recovery.tar.gz" -out "$RUNNER_TEMP/bs-config-B.enc"
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BS_BACKUP_PASSPHRASE -in "$RUNNER_TEMP/bs-config-A.enc" | tar -tzf - > /dev/null
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BS_BACKUP_PASSPHRASE -in "$RUNNER_TEMP/bs-config-B.enc" | tar -tzf - > /dev/null
+          echo 'ENCRYPTED_RECOVERY_A_B_OK'
+      - name: External A backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: belastock-www-recovery-A
+          path: ${{ runner.temp }}/bs-config-A.enc
+          retention-days: 90
+          if-no-files-found: error
+      - name: External B backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: belastock-www-recovery-B
+          path: ${{ runner.temp }}/bs-config-B.enc
+          retention-days: 90
+          if-no-files-found: error
+      - name: Correct canonical www Nginx and WordPress with automatic rollback
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          root=/home/belastock/htdocs/belastock.com.br
+          conf=/etc/nginx/sites-enabled/belastock.com.br.conf
+          wpconf="$root/wp-config.php"
+          test -f "$conf" && test -f "$wpconf" && test ! -L "$conf" && test ! -L "$wpconf"
+          scratch=$(mktemp -d -p /tmp bs-www-txn.XXXXXXXX)
+          cp -p "$conf" "$scratch/nginx.conf"
+          cp -p "$wpconf" "$scratch/wp-config.php"
+          done_ok=0
+          finish() {
+            code=$?
+            trap - EXIT
+            if [ "$done_ok" -ne 1 ]; then
+              cp -p "$scratch/nginx.conf" "$conf" || true
+              cp -p "$scratch/wp-config.php" "$wpconf" || true
+              (cd "$root" && wp option update home 'https://belastock.com.br' --allow-root --skip-plugins --skip-themes >/dev/null && wp option update siteurl 'https://belastock.com.br' --allow-root --skip-plugins --skip-themes >/dev/null) || true
+              nginx -t >/dev/null 2>&1 && (nginx -s reload || true)
+              echo 'ROLLBACK_PERFORMED'
+            fi
+            rm -rf "$scratch"
+            exit "$code"
+          }
+          trap finish EXIT
+          export BS_NGINX_PATH="$conf" BS_WPCONFIG_PATH="$wpconf"
+          python3 - <<'PY'
+          import os,re,pathlib
+          n=pathlib.Path(os.environ['BS_NGINX_PATH'])
+          original=n.read_text()
+          m=re.search(r'^server \{.*?^\}',original,flags=re.M|re.S)
+          if not m: raise SystemExit('No first Nginx server block')
+          first=m.group(0)
+          old_www='server_name www.belastock.com.br;'
+          old_redirect='return 301 https://belastock.com.br$request_uri;'
+          old_rest='server_name belastock.com.br www1.belastock.com.br;'
+          if first.count(old_www)!=1 or first.count(old_redirect)!=1: raise SystemExit('Unexpected redirect block; no change')
+          rest=original[m.end():]
+          if rest.count(old_rest)!=2: raise SystemExit('Unexpected WordPress vhosts; no change')
+          first=first.replace(old_www,old_rest).replace(old_redirect,'return 404;')
+          rest=rest.replace(old_rest,old_www)
+          n.write_text(original[:m.start()]+first+rest)
+          w=pathlib.Path(os.environ['BS_WPCONFIG_PATH'])
+          previous=w.read_text()
+          new=previous
+          for const in ('WP_HOME','WP_SITEURL'):
+              pat=r"""(define\(\s*['"]"""+const+r"""['"]\s*,\s*['"])https://belastock\.com\.br(['"]\s*\)\s*;)"""
+              new,count=re.subn(pat,r'\g<1>https://www.belastock.com.br\g<2>',new)
+              if count!=1: raise SystemExit('Unexpected WP constant '+const+'; rollback')
+          w.write_text(new)
+          PY
+          php -l "$wpconf" >/dev/null
+          nginx -t
+          cd "$root"
+          wp option update home https://www.belastock.com.br --allow-root --skip-plugins --skip-themes >/dev/null
+          wp option update siteurl https://www.belastock.com.br --allow-root --skip-plugins --skip-themes >/dev/null
+          test "$(wp option get home --allow-root --skip-plugins --skip-themes)" = 'https://www.belastock.com.br'
+          test "$(wp option get siteurl --allow-root --skip-plugins --skip-themes)" = 'https://www.belastock.com.br'
+          nginx -s reload
+          sleep 2
+          status=$(curl -k --noproxy '*' --resolve www.belastock.com.br:443:127.0.0.1 -sS --max-time 15 --max-redirs 0 -o /dev/null -w '%{http_code}' https://www.belastock.com.br/)
+          echo "ORIGIN_WWW_HTTP=$status"
+          test "$status" = 200
+          echo -n 'UPLOAD_BASE='
+          wp eval 'echo wp_get_upload_dir()["baseurl"].PHP_EOL;' --allow-root --skip-plugins --skip-themes
+          done_ok=1
+          echo 'ORIGIN_WWW_REPAIRED'
+          REMOTE
+      - name: Public HTTPS validation
+        run: |
+          set -euo pipefail
+          for url in https://www.belastock.com.br/ https://www.belastock.com.br/wp-content/uploads/2024/05/camisa_225.webp; do
+            code=$(curl -sS --max-time 20 --max-redirs 0 -o /dev/null -w '%{http_code}' "$url")
+            echo "HTTP=$code $url"
+            test "$code" = 200
+          done
