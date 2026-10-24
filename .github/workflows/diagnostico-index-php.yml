@@ -1,0 +1,39 @@
+name: BelaStock - Verificar index.php principal
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/diagnostico-index-php.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Inspect WordPress root index.php (read only)
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd /home/belastock/htdocs/belastock.com.br
+          echo '=== ENTRYPOINT FILES ==='
+          for f in index.php wp-blog-header.php wp-load.php wp-settings.php wp-config.php; do
+            if [ -f "$f" ]; then stat -c '%n bytes=%s mode=%a' "$f";else echo "$f MISSING";fi
+          done
+          echo '=== PHP ENTRYPOINT CONTENT (index.php only) ==='
+          if [ -f index.php ]; then sed -n '1,32p' index.php | head -c 1600;fi
+          echo
+          echo '=== PHP LINT ==='
+          php -l index.php || true
+          echo 'ENTRYPOINT_AUDIT_COMPLETE'
+          REMOTE
