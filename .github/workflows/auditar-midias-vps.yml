@@ -1,0 +1,73 @@
+name: BelaStock - Auditoria somente leitura das midias na VPS
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/auditar-midias-vps.yml']
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Inspecionar midias locais e miniaturas sem modificar arquivos
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/bs_key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/bs_key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/bs_key" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o ConnectTimeout=12 "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          root=/home/belastock/htdocs/belastock.com.br
+          test -f "$root/wp-config.php"
+          cd "$root"
+          echo '=== CURRENT LOCAL STORAGE ==='
+          stat -c 'UPLOADS_OWNER=%U GROUP=%G MODE=%a' wp-content/uploads
+          du -sh wp-content/uploads | sed 's/^/UPLOADS_TOTAL_SIZE=/'
+          find wp-content/uploads -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.gif' -o -iname '*.avif' \) | wc -l | sed 's/^/UPLOADED_IMAGE_FILES=/'
+          echo '=== WORDPRESS ATTACHMENT AND THUMBNAIL REFERENCES ==='
+          wp eval '
+            $ids=get_posts(["post_type"=>"attachment","post_status"=>"inherit","posts_per_page"=>-1,"fields"=>"ids"]);
+            $stats=["total"=>0,"original_present"=>0,"original_missing"=>0,"thumbnails_present"=>0,"thumbnails_missing"=>0,"image_url_wrong_host"=>0,"unreadable"=>0];
+            $bad=[];
+            $base=wp_get_upload_dir();
+            foreach($ids as $id){
+              $stats["total"]++;
+              $file=get_attached_file($id);
+              $metadata=wp_get_attachment_metadata($id);
+              if($file && is_file($file)){$stats["original_present"]++;if(!is_readable($file))$stats["unreadable"]++;}
+              else{$stats["original_missing"]++;if(count($bad)<12)$bad[]="missing_original #".$id." ".($file?basename($file):"(no path)");}
+              $url=wp_get_attachment_url($id);
+              if($url && strpos($url,"https://www.belastock.com.br/")!==0){$stats["image_url_wrong_host"]++;if(count($bad)<12)$bad[]="old_url #".$id." ".parse_url($url,PHP_URL_HOST);}
+              if(is_array($metadata)&&!empty($metadata["sizes"])&&$file){
+                foreach($metadata["sizes"] as $size){
+                  if(!is_array($size)||empty($size["file"]))continue;
+                  $thumb=dirname($file)."/".$size["file"];
+                  if(is_file($thumb))$stats["thumbnails_present"]++;
+                  else{$stats["thumbnails_missing"]++;if(count($bad)<12)$bad[]="missing_thumb #".$id." ".basename($thumb);}
+                }
+              }
+            }
+            foreach($stats as $key=>$value)echo strtoupper($key)."=".$value.PHP_EOL;
+            foreach($bad as $b)echo "SAMPLE=".$b.PHP_EOL;
+          ' --allow-root --skip-plugins --skip-themes
+          echo '=== MEDIA CONFIGURATION ==='
+          wp option get home --allow-root --skip-plugins --skip-themes | sed 's/^/HOME=/'
+          wp option get siteurl --allow-root --skip-plugins --skip-themes | sed 's/^/SITEURL=/'
+          echo '=== ID 50 FILE REFERENCE ==='
+          wp eval '
+            $id=50;$f=get_attached_file($id);
+            echo "ID50_FILENAME=".basename((string)$f).PHP_EOL;
+            echo "ID50_URL=".wp_get_attachment_url($id).PHP_EOL;
+            echo "ID50_POST_TITLE=".get_the_title($id).PHP_EOL;
+          ' --allow-root --skip-plugins --skip-themes
+          echo 'VPS_LOCAL_MEDIA_AUDIT_COMPLETE'
+          REMOTE
