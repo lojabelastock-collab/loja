@@ -1,0 +1,74 @@
+name: BelaStock - Conferir imagens da vitrine e anexo 50
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/conferir-vitrine-midia.yml']
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Test real home page images
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import urllib.request,urllib.error,html.parser,collections,urllib.parse
+          host='https://www.belastock.com.br'
+          class Images(html.parser.HTMLParser):
+            def __init__(self):super().__init__();self.urls=[]
+            def handle_starttag(self,tag,attrs):
+              if tag not in ('img','source'):return
+              d=dict(attrs)
+              for key in ('src','data-src','data-lazy-src'):
+                u=d.get(key,'')
+                if u and not u.startswith('data:'):self.urls.append(urllib.parse.urljoin(host,u));break
+          req=urllib.request.Request(host+'/',headers={'User-Agent':'Mozilla/5.0 BelaStock-Audit'})
+          with urllib.request.urlopen(req,timeout=20) as res:page=res.read().decode('utf-8','replace')
+          parser=Images();parser.feed(page)
+          urls=list(dict.fromkeys(parser.urls))
+          counts=collections.Counter()
+          for u in urls[:65]:
+            if not u.startswith(host+'/'):counts['external_ref']+=1;continue
+            try:
+              with urllib.request.urlopen(urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0'}),timeout=12) as res:
+                ct=res.headers.get('Content-Type','')
+                header=res.read(32)
+                ok=res.status==200 and ct.startswith('image/') and len(header)>0
+                counts['ok' if ok else 'invalid_response']+=1
+                if not ok:print('BAD_IMAGE',res.status,ct,urllib.parse.urlsplit(u).path)
+            except urllib.error.HTTPError as exc:
+              counts['http_error_'+str(exc.code)]+=1;print('BAD_IMAGE',exc.code,urllib.parse.urlsplit(u).path)
+            except Exception as exc:
+              counts['other_error']+=1;print('BAD_IMAGE',type(exc).__name__,urllib.parse.urlsplit(u).path)
+          print('HOME_IMAGE_REFERENCES=',len(urls),'CHECKED=',min(65,len(urls)),'RESULT=',dict(counts))
+          PY
+      - name: Inspect local file and usage only on BelaStock WordPress
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          root=/home/belastock/htdocs/belastock.com.br
+          test -f "$root/wp-config.php"
+          cd "$root"
+          echo '=== SAME-SITE FILES MATCHING religiosas ==='
+          find "$root" -type f -iname '*religiosas*' -printf '%P\n' 2>/dev/null | head -35
+          echo '=== ANEXO 50 USAGE COUNTS (no content output) ==='
+          prefix=$(wp db prefix --allow-root --skip-plugins --skip-themes)
+          wp db query "SELECT 'thumbnail_ref' AS area,COUNT(*) AS total FROM $prefixpostmeta WHERE meta_key='_thumbnail_id' AND meta_value='50'; SELECT 'content_url' AS area,COUNT(*) AS total FROM $prefixposts WHERE post_content LIKE '%religiosas.png%';" --allow-root --skip-plugins --skip-themes
+          echo '=== upload permission modes ==='
+          stat -c 'uploads=%U:%G %a' wp-content/uploads
+          for year in wp-content/uploads/2024 wp-content/uploads/2024/04 wp-content/uploads/2024/05; do [ ! -d "$year" ] || stat -c '%n=%U:%G %a' "$year"; done
+          echo 'LOCAL_MEDIA_INSPECTION_COMPLETE'
+          REMOTE
