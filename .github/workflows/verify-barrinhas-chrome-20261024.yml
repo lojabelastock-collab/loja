@@ -1,4 +1,4 @@
-name: BelaStock - Chrome categoria Barrinhas e imagens final
+name: BelaStock - Validacao final Barrinhas e logo de pagamento
 on:
   push:
     branches: [audit/www-media-20261024]
