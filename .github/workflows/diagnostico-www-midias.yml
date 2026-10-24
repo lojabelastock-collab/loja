@@ -1,0 +1,92 @@
+name: BelaStock WWW - Diagnostico de midias (somente leitura)
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths:
+      - '.github/workflows/diagnostico-www-midias.yml'
+permissions:
+  contents: read
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - name: Public DNS and HTTP inspection
+        run: |
+          set -uo pipefail
+          echo "=== Canonical domain DNS ==="
+          getent ahostsv4 www.belastock.com.br | head -3 || true
+          echo "=== Canonical domain HTTPS ==="
+          curl --max-time 15 --silent --show-error \
+            --output /tmp/belastock-www.html \
+            --write-out 'http=%{http_code} effective=%{url_effective} redirects=%{num_redirects} bytes=%{size_download}\n' \
+            https://www.belastock.com.br/ || true
+          python3 - <<'PY'
+          import pathlib,html,re,urllib.parse
+          p=pathlib.Path('/tmp/belastock-www.html')
+          if not p.exists(): print('HTML unavailable'); exit()
+          s=p.read_text(errors='replace')
+          print('HTML markers:',{n:s.lower().count(n) for n in ('tracosnativos.local','localhost','loja.belastock.com.br','wp-content/uploads','drive.google.com')})
+          urls=[]
+          for x in re.findall(r'''(?:src|srcset|data-src|data-bg)=["']([^"']+)["']''',s,re.I):
+              for v in re.split(r',\s*(?=https?://|/)',html.unescape(x)):
+                  v=v.strip().split()[0]
+                  if any(k in v.lower() for k in ('jpg','png','webp','jpeg','uploads','local')):
+                      urls.append(v)
+          from collections import Counter
+          hosts=Counter(urllib.parse.urlparse(u).netloc or '(relative)' for u in urls)
+          print('Media hosts:',dict(hosts))
+          for u in urls[:12]:
+              print('Media sample:',u[:220])
+          PY
+      - name: Read-only VPS audit with loja-scoped credentials
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          if [ -z "$HOST" ] || [ -z "$USER" ] || [ -z "$KEY" ] || [ -z "$KNOWN" ]; then
+             echo 'SSH diagnosis blocked: one or more loja repository credentials are not configured'
+             exit 0
+          fi
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/bs_audit_key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/bs_audit_key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/bs_audit_key" -o IdentitiesOnly=yes \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=12 \
+            "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -uo pipefail
+          echo '=== Nginx www vhost references (read-only) ==='
+          for folder in /etc/nginx/sites-enabled /etc/nginx/sites-available; do
+            [ -d "$folder" ] || continue
+            grep -lEr 'server_name.*www\.belastock\.com\.br' "$folder" 2>/dev/null | head -8 | while read -r conf; do
+              echo "config=$conf"
+              grep -E '^[[:space:]]*(server_name|root)[[:space:]]+' "$conf" | head -10 || true
+            done
+          done
+          for root in \
+            /home/wwwbelastock/htdocs/belastock.com.br \
+            /home/belastock/htdocs/www.belastock.com.br \
+            /home/belastock-loja/htdocs/loja.belastock.com.br; do
+            [ -f "$root/wp-config.php" ] || continue
+            echo "=== WP candidate: $root ==="
+            stat -c 'owner=%U group=%G' "$root" || true
+            if command -v wp >/dev/null 2>&1; then
+              for option in home siteurl; do
+                echo -n "$option="
+                (cd "$root" && wp option get "$option" --allow-root --skip-plugins --skip-themes 2>/dev/null) || echo '<unavailable>'
+              done
+              echo -n 'attachments='
+              (cd "$root" && wp post list --post_type=attachment --post_status=inherit --format=count --allow-root --skip-plugins --skip-themes 2>/dev/null) || echo '<unavailable>'
+              echo -n 'uploads_dir='
+              if [ -d "$root/wp-content/uploads" ]; then echo present; else echo absent; fi
+            else
+              echo 'WP CLI not present'
+            fi
+          done
+          echo 'Read-only diagnosis completed'
+          REMOTE
