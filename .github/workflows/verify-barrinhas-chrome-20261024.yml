@@ -1,0 +1,48 @@
+name: BelaStock - Chrome categoria Barrinhas e imagens final
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/verify-barrinhas-chrome-20261024.yml']
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Browser checks
+        run: |
+          set -euo pipefail
+          npm install --silent --no-fund --no-audit --prefix "$RUNNER_TEMP/bela-browser" playwright
+          cat > "$RUNNER_TEMP/bela-browser/audit.cjs" <<'JS'
+          const {chromium}=require('playwright');
+          (async()=>{
+            const browser=await chromium.launch({channel:'chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+            for(const suffix of ['/categoria-produto/quarto-crescente/barrinhas/','/']){
+              const p=await browser.newPage({viewport:{width:1366,height:1000}});
+              const failed=[];
+              p.on('response',res=>{if(res.status()>=400&&failed.length<12)failed.push([res.status(),new URL(res.url()).pathname])});
+              let response=await p.goto('https://www.belastock.com.br'+suffix,{waitUntil:'domcontentloaded',timeout:40000});
+              await p.waitForTimeout(6000);
+              for(let y of [600,1250,2050,3000]){await p.evaluate(v=>scrollTo(0,v),y);await p.waitForTimeout(150)}
+              const snapshot=await p.evaluate(()=>{
+                const imgs=[...document.images];
+                const products=[...document.querySelectorAll('li.product,.woocommerce ul.products li.product')];
+                return {
+                  critical:document.body.innerText.toLowerCase().includes('há um erro crítico'),
+                  productCards:products.length,
+                  images:imgs.length,
+                  loaded:imgs.filter(e=>e.complete && e.naturalWidth>0).length,
+                  broken:imgs.filter(e=>e.complete && e.naturalWidth===0).map(e=>({url:e.currentSrc||e.src,alt:e.alt})).slice(0,15),
+                  productImages:products.slice(0,8).map(e=>({title:e.querySelector('h2')?.textContent?.trim().slice(0,45),img:e.querySelector('img')?.currentSrc||'',width:e.querySelector('img')?.naturalWidth||0}))
+                };
+              });
+              console.log('PAGE='+suffix+' HTTP='+response.status()+' DATA='+JSON.stringify(snapshot));
+              console.log('FAILED='+JSON.stringify(failed));
+              if(response.status()!==200||snapshot.critical)process.exitCode=1;
+              await p.close();
+            }
+            await browser.close();
+          })().catch(err=>{console.error('BROWSER_ERROR='+err.message);process.exitCode=1});
+          JS
+          node "$RUNNER_TEMP/bela-browser/audit.cjs"
