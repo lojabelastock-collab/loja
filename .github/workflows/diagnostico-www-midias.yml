@@ -38,6 +38,17 @@ jobs:
           print('Media hosts:',dict(hosts))
           for u in urls[:12]:
               print('Media sample:',u[:220])
+          import urllib.request,urllib.error
+          for u in list(dict.fromkeys(urls))[:18]:
+              if not u.startswith('https://www.belastock.com.br/'): continue
+              try:
+                  req=urllib.request.Request(u,method='HEAD',headers={'User-Agent':'Mozilla/5.0 BelaStock-Diagnostic'})
+                  with urllib.request.urlopen(req,timeout=8) as resp:
+                      print('Image HTTP:',resp.status,resp.headers.get('Content-Type'),u[:150])
+              except urllib.error.HTTPError as err:
+                  print('Image HTTP:',err.code,u[:150])
+              except Exception as err:
+                  print('Image HTTP error:',type(err).__name__,u[:150])
           PY
       - name: Read-only VPS audit with loja-scoped credentials
         env:
@@ -69,12 +80,16 @@ jobs:
             done
           done
           for root in \
+            /home/belastock/htdocs/belastock.com.br \
             /home/wwwbelastock/htdocs/belastock.com.br \
             /home/belastock/htdocs/www.belastock.com.br \
             /home/belastock-loja/htdocs/loja.belastock.com.br; do
             [ -f "$root/wp-config.php" ] || continue
             echo "=== WP candidate: $root ==="
             stat -c 'owner=%U group=%G' "$root" || true
+            for rel in wp-content/uploads/2024/05/camisa_225.webp wp-content/uploads/2024/05/camisa_10.webp wp-content/uploads/2024/04/Bela-Store-logo-2-768x225.png.webp; do
+              if [ -f "$root/$rel" ]; then echo "disk_media=present $rel"; else echo "disk_media=missing $rel"; fi
+            done
             if command -v wp >/dev/null 2>&1; then
               for option in home siteurl; do
                 echo -n "$option="
