@@ -40,7 +40,7 @@ jobs:
                 display:getComputedStyle(el).display,visibility:getComputedStyle(el).visibility,opacity:getComputedStyle(el).opacity,
                 parent:el.parentElement?.className?.toString().slice(0,120)
               }));
-              const sliderSelectors=['rs-module','rs-slides','rs-slide','.rev_slider','.rev_slider_wrapper','.revslider-initialised','.tp-revslider-mainul','.rs-module-wrap','.elementor-widget-slider_revolution','.elementor-widget-slider-revolution'];
+              const sliderSelectors=['rs-module','rs-slides','rs-slide','.elementor-widget-slides','.swiper-slide-bg','.rev_slider','.rev_slider_wrapper','.revslider-initialised','.tp-revslider-mainul','.rs-module-wrap','.elementor-widget-slider_revolution','.elementor-widget-slider-revolution'];
               const sliders={};
               for(const sel of sliderSelectors){
                 const matched=[...document.querySelectorAll(sel)];
