@@ -1,0 +1,47 @@
+name: BelaStock - Verificar GUID e anexo ausente
+on:
+  push:
+    branches: [audit/www-media-20261024]
+    paths: ['.github/workflows/auditar-guids-anexo.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Non-destructive final legacy and attachment readback
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/key"
+          printf '%s\n' "$KNOWN" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          root=/home/belastock/htdocs/belastock.com.br
+          cd "$root"
+          echo '=== GUID included; full WP prefix database legacy dry run ==='
+          wp search-replace tracosnativos.local www.belastock.com.br --all-tables-with-prefix --dry-run --precise --report-changed-only --allow-root --skip-plugins --skip-themes
+          echo '=== Missing attachment ID 50 metadata (no content modifications) ==='
+          wp eval '
+            $id=50;
+            $p=get_post($id);
+            if(!$p){echo "ID50=no_post".PHP_EOL;return;}
+            $f=get_attached_file($id);
+            echo "ID50_type=".get_post_mime_type($id).PHP_EOL;
+            echo "ID50_filename=".($f?basename($f):"(empty)").PHP_EOL;
+            echo "ID50_path_recorded=".($f?"yes":"no").PHP_EOL;
+            echo "ID50_parent_id=".(int)$p->post_parent.PHP_EOL;
+            echo "ID50_file_exists=".($f&&file_exists($f)?"yes":"no").PHP_EOL;
+          ' --allow-root --skip-plugins --skip-themes
+          echo '=== Legacy literal in all files except image/cache binaries ==='
+          (grep -rlI 'tracosnativos[.]local' wp-config.php wp-content/themes wp-content/plugins --exclude-dir=cache --exclude-dir=vendor --exclude-dir=node_modules 2>/dev/null || true) | head -10
+          echo 'AUDIT_COMPLETE'
+          REMOTE
