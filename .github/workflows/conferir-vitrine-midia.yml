@@ -66,7 +66,11 @@ jobs:
           find "$root" -type f -iname '*religiosas*' -printf '%P\n' 2>/dev/null | head -35
           echo '=== ANEXO 50 USAGE COUNTS (no content output) ==='
           prefix=$(wp db prefix --allow-root --skip-plugins --skip-themes)
-          wp db query "SELECT 'thumbnail_ref' AS area,COUNT(*) AS total FROM $prefixpostmeta WHERE meta_key='_thumbnail_id' AND meta_value='50'; SELECT 'content_url' AS area,COUNT(*) AS total FROM $prefixposts WHERE post_content LIKE '%religiosas.png%';" --allow-root --skip-plugins --skip-themes
+          wp db query "SELECT 'thumbnail_ref' AS area,COUNT(*) AS total FROM ${prefix}postmeta WHERE meta_key='_thumbnail_id' AND meta_value='50'; SELECT 'content_url' AS area,COUNT(*) AS total FROM ${prefix}posts WHERE post_content LIKE '%religiosas.png%'; SELECT 'mercadopago_content' AS area,COUNT(*) AS total FROM ${prefix}posts WHERE post_content LIKE '%mercadopago-logo-300x122-1.png%'; SELECT 'mercadopago_meta' AS area,COUNT(*) AS total FROM ${prefix}postmeta WHERE meta_value LIKE '%mercadopago-logo-300x122-1.png%';" --allow-root --skip-plugins --skip-themes
+          echo '=== SAME-SITE MERCADOPAGO LOGO ALTERNATIVES ==='
+          find "$root/wp-content/uploads" -type f \( -iname '*mercadopago*' -o -iname '*mercado-pago*' \) -printf '%P\n' 2>/dev/null | head -35
+          echo '=== MEDIA SOURCE FILES (reference origins, count) ==='
+          grep -rIl --include='*.php' --include='*.css' --include='*.js' 'mercadopago-logo-300x122-1.png' "$root/wp-content/themes" "$root/wp-content/plugins" 2>/dev/null | head -12 || true
           echo '=== upload permission modes ==='
           stat -c 'uploads=%U:%G %a' wp-content/uploads
           for year in wp-content/uploads/2024 wp-content/uploads/2024/04 wp-content/uploads/2024/05; do [ ! -d "$year" ] || stat -c '%n=%U:%G %a' "$year"; done
